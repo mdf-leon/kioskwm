@@ -32,6 +32,7 @@ pub fn handle_pointer_button(state: &mut State, pos: Point<f64, smithay::utils::
         Hit::Close => {
             state.overlay_open = false;
             reset_on_open(state);
+            state.request_render();
         }
         Hit::AppletMouse => {
             state.settings.screen = Screen::Mouse;

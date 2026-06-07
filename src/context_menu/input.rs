@@ -40,6 +40,8 @@ pub fn open_at_logical(state: &mut State, x: f64, y: f64) {
         other => Some(other),
     };
     invalidate_cache(state);
+    state.note_full_damage();
+    state.request_render();
     let count = state.app_count();
     tracing::info!("Menu WM em ({ox}, {oy}) — {count} app(s), foco índice {}", state.unified_focus_index());
     for i in 0..count {
@@ -60,6 +62,7 @@ pub fn close(state: &mut State) {
     state.context_menu.hover = None;
     invalidate_cache(state);
     state.resync_input_after_overlay();
+    state.request_render();
 }
 
 pub fn handle_pointer_button(

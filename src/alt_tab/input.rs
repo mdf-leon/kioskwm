@@ -72,6 +72,8 @@ fn open_overlay(state: &mut State) {
     state.alt_tab.open = true;
     state.deferred_focus = true;
     state.suspend_client_keyboard_for_wm_ui();
+    state.note_full_damage();
+    state.request_render();
 }
 
 fn cycle_next(state: &mut State) {
@@ -87,6 +89,7 @@ fn cycle_next(state: &mut State) {
         state.alt_tab.slot = (state.alt_tab.slot + 1) % count;
     }
     invalidate_cache(state);
+    state.request_render();
 }
 
 fn cycle_prev(state: &mut State) {
@@ -102,6 +105,7 @@ fn cycle_prev(state: &mut State) {
         state.alt_tab.slot = (state.alt_tab.slot + count - 1) % count;
     }
     invalidate_cache(state);
+    state.request_render();
 }
 
 fn confirm(state: &mut State) {
@@ -125,6 +129,7 @@ fn confirm(state: &mut State) {
     tracing::info!("Alt+Tab confirma índice {idx} → {name}");
     state.focus_unified(idx);
     state.resync_input_after_overlay();
+    state.request_render();
 }
 
 pub fn close(state: &mut State) {
@@ -135,4 +140,5 @@ pub fn close(state: &mut State) {
     state.alt_tab.slot = 0;
     invalidate_cache(state);
     state.resync_input_after_overlay();
+    state.request_render();
 }

@@ -13,6 +13,7 @@ mod input;
 mod kill_switch;
 mod overlay;
 mod parent_shortcuts;
+mod perf;
 mod render;
 mod settings;
 mod spawn;

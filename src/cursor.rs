@@ -16,6 +16,8 @@ use xcursor::{parser::parse_xcursor, CursorTheme};
 pub struct PointerCursor {
     pub buffer: MemoryRenderBuffer,
     pub hotspot: (i32, i32),
+    pub width: i32,
+    pub height: i32,
 }
 
 impl PointerCursor {
@@ -87,6 +89,8 @@ fn try_load_from_theme(theme_name: &str) -> Result<PointerCursor, Box<dyn std::e
     );
 
     Ok(PointerCursor {
+        width: image.width as i32,
+        height: image.height as i32,
         buffer,
         hotspot: (image.xhot as i32, image.yhot as i32),
     })
@@ -119,6 +123,8 @@ fn fallback_cursor() -> PointerCursor {
         }
     }
     PointerCursor {
+        width: w,
+        height: h,
         buffer: MemoryRenderBuffer::from_slice(
             &pixels,
             Fourcc::Argb8888,

@@ -456,6 +456,8 @@ impl crate::state::State {
         }
         self.deferred_focus = false;
         self.dispatch_input_focus();
+        self.note_full_damage();
+        self.request_render();
     }
 
     pub fn flush_deferred_focus(&mut self) {

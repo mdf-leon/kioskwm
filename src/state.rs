@@ -4,6 +4,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
     },
+    time::{Duration, Instant},
 };
 
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
@@ -118,6 +119,8 @@ pub struct State {
     pub output_size: Size<i32, Logical>,
     /// TTY=Normal; winit aninhado=Flipped180.
     pub output_transform: Transform,
+    /// TTY desenha cursor do compositor; winit deixa o cliente/pai cuidar.
+    pub draw_compositor_cursor: bool,
     pub exit_requested: Arc<AtomicBool>,
     pub overlay_open: bool,
     /// Multiplicador de movimento do ponteiro (1.0 = padrao).
@@ -134,6 +137,13 @@ pub struct State {
     pub mod_tracker: std::sync::Arc<crate::modifiers::ModifierTracker>,
     /// Super keys seen by the compositor keyboard (KDE may not deliver them).
     pub local_super_keys: u8,
+    /// Render agendado — evita busy-loop desenhando só quando necessário.
+    render_pending: bool,
+    render_deadline: Option<Instant>,
+    force_full_damage: bool,
+    last_cursor_pos: Option<Point<f64, Logical>>,
+    pointer_flush_pending: bool,
+    pending_pointer_time: u32,
     serial: u32,
 }
 
@@ -153,6 +163,142 @@ impl State {
     pub fn next_serial(&mut self) -> Serial {
         self.serial += 1;
         self.serial.into()
+    }
+
+    pub fn request_render(&mut self) {
+        self.render_pending = true;
+        self.render_deadline = None;
+    }
+
+    pub fn request_render_debounced(&mut self, delay: Duration) {
+        self.render_pending = true;
+        let deadline = Instant::now() + delay;
+        self.render_deadline = Some(match self.render_deadline {
+            Some(current) => current.min(deadline),
+            None => deadline,
+        });
+    }
+
+    pub fn take_render_pending(&mut self) -> bool {
+        if !self.render_pending {
+            return false;
+        }
+        if let Some(deadline) = self.render_deadline {
+            if Instant::now() < deadline {
+                return false;
+            }
+        }
+        self.render_pending = false;
+        self.render_deadline = None;
+        true
+    }
+
+    pub fn note_full_damage(&mut self) {
+        self.force_full_damage = true;
+    }
+
+    pub fn wants_full_damage(&self) -> bool {
+        self.force_full_damage
+            || self.overlay_open
+            || self.context_menu.open
+            || self.alt_tab.open
+            || self.active_popup.is_some()
+    }
+
+    /// Overlay WM aberto — não compor apps por baixo (só painel/menu).
+    pub fn wm_ui_obscures_apps(&self) -> bool {
+        self.overlay_open || self.context_menu.open || self.alt_tab.open
+    }
+
+    pub fn last_cursor_pos(&self) -> Option<Point<f64, Logical>> {
+        self.last_cursor_pos
+    }
+
+    pub fn set_last_cursor_pos(&mut self, pos: Point<f64, Logical>) {
+        self.last_cursor_pos = Some(pos);
+    }
+
+    pub fn finish_frame_damage_state(&mut self, pointer: Option<Point<f64, Logical>>) {
+        self.force_full_damage = false;
+        if let Some(pos) = pointer {
+            self.last_cursor_pos = Some(pos);
+        }
+    }
+
+    pub fn mark_pointer_moved(&mut self, time: u32) {
+        self.pointer_flush_pending = true;
+        self.pending_pointer_time = time;
+        crate::perf::record_pointer_move();
+    }
+
+    pub fn flush_pointer_to_client(&mut self) {
+        if !self.pointer_flush_pending {
+            return;
+        }
+        if self.overlay_open || self.context_menu.open || self.alt_tab.open {
+            self.pointer_flush_pending = false;
+            return;
+        }
+        self.pointer_flush_pending = false;
+        let pointer = self.pointer.clone();
+        let serial = self.next_serial();
+        let focus = self.pointer_focus();
+        pointer.motion(
+            self,
+            focus,
+            &MotionEvent {
+                location: self.pointer_pos,
+                serial,
+                time: self.pending_pointer_time,
+            },
+        );
+        pointer.frame(self);
+    }
+
+    pub fn needs_x11_dispatch(&self) -> bool {
+        !self.x11_apps.is_empty() || self.x11_focus_pending
+    }
+
+    pub fn wayland_dispatch_rounds(&self) -> usize {
+        if self.overlay_open {
+            return 1;
+        }
+        if self.active_popup.is_some() {
+            return 10;
+        }
+        if self.context_menu.open || self.alt_tab.open {
+            return 4;
+        }
+        1
+    }
+
+    pub fn wayland_post_frame_rounds(&self) -> usize {
+        if self.active_popup.is_some() {
+            return 10;
+        }
+        if self.context_menu.open || self.alt_tab.open || self.overlay_open {
+            return 4;
+        }
+        2
+    }
+
+    fn note_surface_commit(&mut self, surface: &WlSurface) {
+        if self.wm_ui_obscures_apps() {
+            return;
+        }
+        let has_buffer = with_states(surface, |states| {
+            states
+                .cached_state
+                .get::<SurfaceAttributes>()
+                .current()
+                .buffer
+                .is_some()
+        });
+        if !has_buffer {
+            return;
+        }
+        self.note_full_damage();
+        self.request_render();
     }
 
     fn is_xwayland_client(&self, surface: &WlSurface) -> bool {
@@ -400,6 +546,8 @@ impl State {
             Some(Scale::Integer(1)),
             Some((0, 0).into()),
         );
+        self.note_full_damage();
+        self.request_render();
         self.reconfigure_all_toplevels();
     }
 }
@@ -681,6 +829,7 @@ impl CompositorHandler for State {
         }
         smithay::backend::renderer::utils::on_commit_buffer_handler::<Self>(surface);
         self.popup_manager.commit(surface);
+        self.note_surface_commit(surface);
     }
 }
 
@@ -850,6 +999,7 @@ pub fn init_state(
         pointer_pos: Point::from((logical_size.w as f64 / 2.0, logical_size.h as f64 / 2.0)),
         output_size: logical_size,
         output_transform: Transform::Normal,
+        draw_compositor_cursor: output_model == "tty",
         exit_requested,
         overlay_open: false,
         pointer_speed: 1.0,
@@ -863,6 +1013,12 @@ pub fn init_state(
         i18n,
         mod_tracker,
         local_super_keys: 0,
+        render_pending: true,
+        render_deadline: None,
+        force_full_damage: true,
+        last_cursor_pos: None,
+        pointer_flush_pending: false,
+        pending_pointer_time: 0,
         serial: 0,
     })
 }
@@ -872,7 +1028,7 @@ pub fn accept_clients(
     state: &mut State,
     listener: &ListeningSocket,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    accept_clients_rounds(display, state, listener, 2)
+    accept_clients_rounds(display, state, listener, state.wayland_dispatch_rounds())
 }
 
 pub fn accept_clients_rounds(

@@ -6,7 +6,7 @@ use smithay::{
         winit::{self, WinitEvent},
     },
     reexports::wayland_server::Display,
-    utils::{Rectangle, Transform},
+    utils::Transform,
 };
 use crate::{
     input::{debug_right_click, handle_input, PointerTracker},
@@ -16,6 +16,7 @@ use crate::{
     kill_switch,
     overlay::OverlayControl,
     parent_shortcuts::ParentShortcutGuard,
+    perf,
     render::{render_kiosk_frame, send_frame_callbacks},
     spawn::{
         bind_wayland_socket, command_exists, log_bound_socket, prepare_runtime_files,
@@ -24,6 +25,8 @@ use crate::{
     state::{accept_clients, accept_clients_rounds, init_state, new_exit_flag, should_exit, State},
 };
 use crate::{env_detect, i18n::I18n, Args};
+
+const IDLE_SLEEP: Duration = Duration::from_millis(16);
 
 pub fn run(args: Args, i18n: I18n) -> Result<(), Box<dyn std::error::Error>> {
     ensure_desktop_env()?;
@@ -152,13 +155,21 @@ pub fn run(args: Args, i18n: I18n) -> Result<(), Box<dyn std::error::Error>> {
             break;
         }
 
-        let size = backend.window_size();
-        let damage = Rectangle::from_size(size);
-
-        {
-            accept_clients(&mut display, &mut state, &listener)?;
+        accept_clients(&mut display, &mut state, &listener)?;
+        if state.needs_x11_dispatch() {
             crate::x11::dispatch(&mut event_loop, &mut state);
+        }
 
+        if !state.take_render_pending() {
+            perf::record_frame_skipped();
+            std::thread::sleep(IDLE_SLEEP);
+            continue;
+        }
+
+        let size = backend.window_size();
+        let time_ms = start_time.elapsed().as_millis() as u32;
+
+        let damage = {
             let (renderer, mut framebuffer) = backend.bind()?;
             render_kiosk_frame(
                 renderer,
@@ -166,20 +177,21 @@ pub fn run(args: Args, i18n: I18n) -> Result<(), Box<dyn std::error::Error>> {
                 &mut state,
                 size,
                 Transform::Flipped180,
-                Some(pointer_tracker.pos),
                 None,
-                start_time.elapsed().as_millis() as u32,
-            )?;
+                None,
+                time_ms,
+            )?
+        };
 
-            send_frame_callbacks(
-                &mut state,
-                start_time.elapsed().as_millis() as u32,
-            );
+        send_frame_callbacks(&mut state, time_ms);
 
-            // O buffer do menu chega após o frame callback — drena a resposta do cliente.
-            let rounds = if state.active_popup.is_some() { 10 } else { 2 };
-            accept_clients_rounds(&mut display, &mut state, &listener, rounds)?;
-        }
+        let post_rounds = state.wayland_post_frame_rounds();
+        accept_clients_rounds(
+            &mut display,
+            &mut state,
+            &listener,
+            post_rounds,
+        )?;
 
         frame_count += 1;
         if auto_rclick
@@ -191,8 +203,7 @@ pub fn run(args: Args, i18n: I18n) -> Result<(), Box<dyn std::error::Error>> {
             auto_rclick_done = true;
         }
 
-        backend.submit(Some(&[damage]))?;
-        std::thread::sleep(Duration::from_millis(1));
+        backend.submit(Some(&damage))?;
     }
 
     Ok(())

@@ -293,6 +293,12 @@ pub fn make_event_loop() -> EventLoop<'static, State> {
 }
 
 /// Processa eventos do XWayland (chamar a cada frame no TTY e no winit).
+pub fn dispatch_if_needed(loop_: &mut EventLoop<'static, State>, state: &mut State) {
+    if state.needs_x11_dispatch() {
+        dispatch(loop_, state);
+    }
+}
+
 pub fn dispatch(loop_: &mut EventLoop<'static, State>, state: &mut State) {
     use std::time::Duration;
     // Limita trabalho X11 por frame — evita starvation do libinput/DRM.

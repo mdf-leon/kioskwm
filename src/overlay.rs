@@ -40,6 +40,8 @@ impl OverlayControl {
             if state.overlay_open { "aberto" } else { "fechado" },
             state.overlay_open
         );
+        state.note_full_damage();
+        state.request_render();
         self.notify_changed();
     }
 
@@ -62,6 +64,8 @@ impl OverlayControl {
                 if state.overlay_open { "aberto" } else { "fechado" },
                 state.overlay_open
             );
+            state.note_full_damage();
+            state.request_render();
         }
     }
 }

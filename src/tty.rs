@@ -141,8 +141,19 @@ fn find_output(device: &DrmDevice) -> Result<OutputConfig, Box<dyn std::error::E
 }
 
 fn request_render(handle: &LoopHandle<'_, TtyLoop>) {
+    let _ = handle.insert_source(Timer::from_duration(Duration::from_millis(8)), |_, _, data| {
+        if data.state.take_render_pending() {
+            data.render_frame();
+        }
+        TimeoutAction::Drop
+    });
+}
+
+fn request_render_immediate(handle: &LoopHandle<'_, TtyLoop>) {
     let _ = handle.insert_source(Timer::immediate(), |_, _, data| {
-        data.render_frame();
+        if data.state.take_render_pending() {
+            data.render_frame();
+        }
         TimeoutAction::Drop
     });
 }
@@ -173,9 +184,10 @@ impl TtyLoop {
         if let Err(err) = accept_clients(&mut self.display, &mut self.state, &self.listener) {
             tracing::warn!("wayland dispatch: {}", err);
         }
-        crate::x11::dispatch(&mut self.x11_loop, &mut self.state);
+        crate::x11::dispatch_if_needed(&mut self.x11_loop, &mut self.state);
 
-        let render_result = (|| -> Result<(), Box<dyn std::error::Error>> {
+        let time_ms = self.start_time.elapsed().as_millis() as u32;
+        let damage = (|| -> Result<Vec<Rectangle<i32, smithay::utils::Physical>>, Box<dyn std::error::Error>> {
             let mut target = self.renderer.bind(&mut dmabuf)?;
             render_kiosk_frame(
                 &mut self.renderer,
@@ -185,37 +197,31 @@ impl TtyLoop {
                 Transform::Normal,
                 Some(self.pointer_tracker.pos),
                 Some(&self.pointer_cursor),
-                self.start_time.elapsed().as_millis() as u32,
-            )?;
-            drop(target);
-            Ok(())
+                time_ms,
+            )
         })();
 
-        if let Err(err) = render_result {
-            tracing::warn!("render falhou: {}", err);
-            return;
-        }
+        let damage = match damage {
+            Ok(d) => d,
+            Err(err) => {
+                tracing::warn!("render falhou: {}", err);
+                return;
+            }
+        };
 
-        let damage = Rectangle::from_size(size);
-        if let Err(err) = self.gbm_surface.queue_buffer(None, Some(vec![damage]), ()) {
+        if let Err(err) = self.gbm_surface.queue_buffer(None, Some(damage.clone()), ()) {
             tracing::warn!("queue_buffer falhou: {}", err);
         }
 
-        send_frame_callbacks(
-            &mut self.state,
-            self.start_time.elapsed().as_millis() as u32,
-        );
+        send_frame_callbacks(&mut self.state, time_ms);
 
-        let rounds = if self.state.overlay_open {
-            1
-        } else if self.state.active_popup.is_some() {
-            10
-        } else {
-            2
-        };
-        if let Err(err) =
-            accept_clients_rounds(&mut self.display, &mut self.state, &self.listener, rounds)
-        {
+        let post_rounds = self.state.wayland_post_frame_rounds();
+        if let Err(err) = accept_clients_rounds(
+            &mut self.display,
+            &mut self.state,
+            &self.listener,
+            post_rounds,
+        ) {
             tracing::warn!("wayland dispatch pós-frame: {}", err);
         }
 
@@ -358,7 +364,8 @@ pub fn run(args: Args, i18n: crate::i18n::I18n) -> Result<(), Box<dyn std::error
                 if event.signal() == Signal::SIGUSR2 {
                     data.overlay.poll(&mut data.state);
                     data.emergency.menu.poll(&mut data.state);
-                    request_render(&signal_handle);
+                    data.state.request_render();
+                    request_render_immediate(&signal_handle);
                 } else {
                     tracing::info!("Sinal {:?} — fechando compositor", event.signal());
                     crate::state::request_exit(&data.state.exit_requested);
@@ -385,6 +392,7 @@ pub fn run(args: Args, i18n: crate::i18n::I18n) -> Result<(), Box<dyn std::error
                 event,
                 Some(&mut tty_vt),
             );
+            data.state.request_render_debounced(Duration::from_millis(8));
             request_render(&handle);
         }
     })?;
@@ -405,7 +413,8 @@ pub fn run(args: Args, i18n: crate::i18n::I18n) -> Result<(), Box<dyn std::error
                 if let Err(err) = data.device.activate(false) {
                     tracing::error!("drm activate: {}", err);
                 }
-                request_render(&handle);
+                data.state.request_render();
+                request_render_immediate(&handle);
             }
         }
     })?;
@@ -417,12 +426,13 @@ pub fn run(args: Args, i18n: crate::i18n::I18n) -> Result<(), Box<dyn std::error
                 if let Err(err) = data.gbm_surface.frame_submitted() {
                     tracing::warn!("frame_submitted: {}", err);
                 }
+                data.state.request_render();
                 request_render(&handle);
             }
         }
     })?;
 
-    request_render(&handle);
+    request_render_immediate(&handle);
 
     event_loop.run(None, &mut data, |_| {})?;
 

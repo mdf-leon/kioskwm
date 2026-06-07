@@ -35,6 +35,13 @@ impl PointerTracker {
     }
 }
 
+fn queue_pointer_render(state: &mut State, time: u32) {
+    state.mark_pointer_moved(time);
+    if state.draw_compositor_cursor {
+        state.request_render_debounced(Duration::from_millis(16));
+    }
+}
+
 fn send_motion(
     state: &mut State,
     pointer: &smithay::input::pointer::PointerHandle<State>,
@@ -142,10 +149,12 @@ pub fn handle_input<B: InputBackend>(
             hardware.set_pointer(tracker.pos.x, tracker.pos.y);
             if state.overlay_open {
                 crate::settings::input::handle_pointer_motion(state, tracker.pos);
+                state.request_render();
             } else if state.context_menu.open {
                 crate::context_menu::handlers::handle_pointer_motion(state, tracker.pos);
+                state.request_render();
             } else {
-                send_motion(state, &pointer, tracker.pos, event.time() as u32);
+                queue_pointer_render(state, event.time() as u32);
             }
         }
         InputEvent::PointerMotionAbsolute { event } => {
@@ -156,10 +165,12 @@ pub fn handle_input<B: InputBackend>(
             hardware.set_pointer(tracker.pos.x, tracker.pos.y);
             if state.overlay_open {
                 crate::settings::input::handle_pointer_motion(state, tracker.pos);
+                state.request_render();
             } else if state.context_menu.open {
                 crate::context_menu::handlers::handle_pointer_motion(state, tracker.pos);
+                state.request_render();
             } else {
-                send_motion(state, &pointer, tracker.pos, event.time() as u32);
+                queue_pointer_render(state, event.time() as u32);
             }
         }
         InputEvent::PointerButton { event } => {
@@ -200,6 +211,7 @@ pub fn handle_input<B: InputBackend>(
                 && crate::context_menu::handlers::super_held(state)
             {
                 crate::context_menu::handlers::open_at(state, tracker.pos);
+                state.request_render();
                 return;
             }
             let time = event.time() as u32;
@@ -210,6 +222,7 @@ pub fn handle_input<B: InputBackend>(
                 state.pointer_pos.x,
                 state.pointer_pos.y
             );
+            state.flush_pointer_to_client();
             send_motion(state, &pointer, state.pointer_pos, time);
             let serial = state.next_serial();
             pointer.button(
@@ -222,6 +235,7 @@ pub fn handle_input<B: InputBackend>(
                 },
             );
             pointer.frame(state);
+            state.request_render();
         }
         InputEvent::PointerAxis { event } => {
             if state.overlay_open || state.context_menu.open || state.alt_tab.open {
@@ -253,6 +267,7 @@ pub fn handle_input<B: InputBackend>(
                 },
             );
             pointer.frame(state);
+            state.request_render();
         }
         _ => {}
     }

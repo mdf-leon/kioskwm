@@ -18,11 +18,16 @@ use wayland_server::{protocol::wl_surface, Resource};
 
 use crate::{
     apps::ActiveTarget,
-    cursor::PointerCursor,
+    cursor::{self, PointerCursor},
+    perf::{self, FrameTimer},
     state::State,
 };
 
 pub fn send_frame_callbacks(state: &mut State, time: u32) {
+    if state.wm_ui_obscures_apps() {
+        state.maintain_popups();
+        return;
+    }
     match state.active_target() {
         Some(ActiveTarget::Wayland(i)) => {
             if let Some(app) = state.running_apps.get(i) {
@@ -47,8 +52,14 @@ pub fn send_frame_callbacks(state: &mut State, time: u32) {
     state.maintain_popups();
 }
 
-/// Renderiza popup incluindo subsurfaces mesmo quando a raiz não tem buffer
-/// (comportamento comum em menus Qt/Konsole).
+pub fn compute_frame_damage(
+    state: &State,
+    size: smithay::utils::Size<i32, Physical>,
+) -> Vec<Rectangle<i32, Physical>> {
+    let _ = state;
+    vec![Rectangle::from_size(size)]
+}
+
 fn render_popup_surface_tree(
     renderer: &mut GlesRenderer,
     surface: &wl_surface::WlSurface,
@@ -113,98 +124,106 @@ pub fn render_kiosk_frame(
     renderer: &mut GlesRenderer,
     target: &mut smithay::backend::renderer::gles::GlesTarget<'_>,
     state: &mut State,
-    size: smithay::utils::Size<i32, smithay::utils::Physical>,
+    size: smithay::utils::Size<i32, Physical>,
     transform: Transform,
     pointer: Option<Point<f64, Logical>>,
     cursor: Option<&PointerCursor>,
     time_ms: u32,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let damage = Rectangle::from_size(size);
+) -> Result<Vec<Rectangle<i32, Physical>>, Box<dyn std::error::Error>> {
+    let timer = FrameTimer::start();
+    state.flush_pointer_to_client();
+
+    let damage = compute_frame_damage(state, size);
+    let full_damage = true;
 
     let mut toplevel_elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> = Vec::new();
     let mut popup_elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> = Vec::new();
     let mut rendered_popups = std::collections::HashSet::new();
 
-    // Kiosk: só a app com foco ativo é desenhada — evita ver/atualizar processo "de trás".
-    match state.active_target() {
-        Some(ActiveTarget::Wayland(i)) => {
-            if let Some(app) = state.running_apps.get(i) {
-                let surface = &app.surface;
-                toplevel_elements.extend(render_elements_from_surface_tree(
-                    renderer,
-                    surface.wl_surface(),
-                    (0, 0),
-                    1.0,
-                    1.0,
-                    Kind::Unspecified,
-                ));
-
-                for (popup, popup_offset) in PopupManager::popups_for_surface(surface.wl_surface()) {
-                    rendered_popups.insert(popup.wl_surface().id());
-                    let wl = popup.wl_surface();
-                    let (ox, oy) = state.popup_render_offset(&popup, popup_offset);
-                    let _ = import_surface_tree(renderer, wl);
-
-                    let mut elems = render_popup_surface_tree(renderer, wl, (ox, oy), Scale::from(1.0));
-                    if elems.is_empty() {
-                        elems = render_elements_from_surface_tree(
-                            renderer,
-                            wl,
-                            (ox, oy),
-                            1.0,
-                            1.0,
-                            Kind::Unspecified,
-                        );
-                    }
-
-                    if elems.is_empty() {
-                        tracing::trace!("popup aguardando buffer em ({ox}, {oy})");
-                    }
-                    popup_elements.extend(elems);
-                }
-            }
-        }
-        Some(ActiveTarget::X11(i)) => {
-            if let Some(app) = state.x11_apps.get(i) {
-                if let Some(wl) = app.surface.wl_surface() {
-                    let _ = import_surface_tree(renderer, &wl);
+    if !state.wm_ui_obscures_apps() {
+        match state.active_target() {
+            Some(ActiveTarget::Wayland(i)) => {
+                if let Some(app) = state.running_apps.get(i) {
+                    let surface = &app.surface;
                     toplevel_elements.extend(render_elements_from_surface_tree(
                         renderer,
-                        &wl,
+                        surface.wl_surface(),
                         (0, 0),
                         1.0,
                         1.0,
                         Kind::Unspecified,
                     ));
+
+                    for (popup, popup_offset) in PopupManager::popups_for_surface(surface.wl_surface())
+                    {
+                        rendered_popups.insert(popup.wl_surface().id());
+                        let wl = popup.wl_surface();
+                        let (ox, oy) = state.popup_render_offset(&popup, popup_offset);
+                        let _ = import_surface_tree(renderer, wl);
+
+                        let mut elems =
+                            render_popup_surface_tree(renderer, wl, (ox, oy), Scale::from(1.0));
+                        if elems.is_empty() {
+                            elems = render_elements_from_surface_tree(
+                                renderer,
+                                wl,
+                                (ox, oy),
+                                1.0,
+                                1.0,
+                                Kind::Unspecified,
+                            );
+                        }
+
+                        if elems.is_empty() {
+                            tracing::trace!("popup aguardando buffer em ({ox}, {oy})");
+                        }
+                        popup_elements.extend(elems);
+                    }
                 }
             }
+            Some(ActiveTarget::X11(i)) => {
+                if let Some(app) = state.x11_apps.get(i) {
+                    if let Some(wl) = app.surface.wl_surface() {
+                        let _ = import_surface_tree(renderer, &wl);
+                        toplevel_elements.extend(render_elements_from_surface_tree(
+                            renderer,
+                            &wl,
+                            (0, 0),
+                            1.0,
+                            1.0,
+                            Kind::Unspecified,
+                        ));
+                    }
+                }
+            }
+            None => {}
         }
-        None => {}
+
+        for popup in state.xdg_shell_state.popup_surfaces() {
+            let wl = popup.wl_surface();
+            if rendered_popups.contains(&wl.id()) {
+                continue;
+            }
+            let Some((ox, oy)) = state.popup_render_offset_for(wl) else {
+                continue;
+            };
+            let _ = import_surface_tree(renderer, wl);
+            let mut elems = render_popup_surface_tree(renderer, wl, (ox, oy), Scale::from(1.0));
+            if elems.is_empty() {
+                elems =
+                    render_elements_from_surface_tree(renderer, wl, (ox, oy), 1.0, 1.0, Kind::Unspecified);
+            }
+            popup_elements.extend(elems);
+        }
     }
 
-    for popup in state.xdg_shell_state.popup_surfaces() {
-        let wl = popup.wl_surface();
-        if rendered_popups.contains(&wl.id()) {
-            continue;
-        }
-        let Some((ox, oy)) = state.popup_render_offset_for(wl) else {
-            continue;
-        };
-        let _ = import_surface_tree(renderer, wl);
-        let mut elems = render_popup_surface_tree(renderer, wl, (ox, oy), Scale::from(1.0));
-        if elems.is_empty() {
-            elems = render_elements_from_surface_tree(renderer, wl, (ox, oy), 1.0, 1.0, Kind::Unspecified);
-        }
-        popup_elements.extend(elems);
-    }
-
-    // Popups ANTES do toplevel na lista: draw_render_elements acumula regiões
-    // opacas do toplevel fullscreen e descartaria o popup como "oculto".
     let mut elements = popup_elements;
     elements.extend(toplevel_elements);
 
     let cursor_elem = match (pointer, cursor) {
-        (Some(pos), Some(cursor)) => Some(crate::cursor::cursor_element(renderer, cursor, pos)?),
+        (Some(pos), Some(cur)) if state.draw_compositor_cursor => {
+            Some(cursor::cursor_element(renderer, cur, pos)?)
+        }
         _ => None,
     };
 
@@ -227,27 +246,35 @@ pub fn render_kiosk_frame(
         None
     };
 
+    let clear_color = if state.wm_ui_obscures_apps() {
+        Color32F::new(0.04, 0.04, 0.04, 1.0)
+    } else {
+        Color32F::new(0.08, 0.08, 0.08, 1.0)
+    };
+
     let mut frame = renderer.render(target, size, transform)?;
-    frame.clear(Color32F::new(0.08, 0.08, 0.08, 1.0), &[damage])?;
-    draw_render_elements::<GlesRenderer, _, _>(&mut frame, 1.0, &elements, &[damage])?;
+    frame.clear(clear_color, &damage)?;
+    draw_render_elements::<GlesRenderer, _, _>(&mut frame, 1.0, &elements, &damage)?;
 
     if let Some(overlay) = alt_tab_overlay {
-        draw_render_elements::<GlesRenderer, _, _>(&mut frame, 1.0, &[overlay.elem], &[damage])?;
+        draw_render_elements::<GlesRenderer, _, _>(&mut frame, 1.0, &[overlay.elem], &damage)?;
     }
 
     if let Some(menu) = context_menu {
-        draw_render_elements::<GlesRenderer, _, _>(&mut frame, 1.0, &[menu.elem], &[damage])?;
+        draw_render_elements::<GlesRenderer, _, _>(&mut frame, 1.0, &[menu.elem], &damage)?;
     }
 
     if let Some(panel) = settings_panel {
-        draw_render_elements::<GlesRenderer, _, _>(&mut frame, 1.0, &[panel.elem], &[damage])?;
+        draw_render_elements::<GlesRenderer, _, _>(&mut frame, 1.0, &[panel.elem], &damage)?;
         crate::settings::draw_overlay_extras(&mut frame, state, size, scale);
     }
 
     if let Some(elem) = cursor_elem {
-        draw_render_elements::<GlesRenderer, _, _>(&mut frame, 1.0, &[elem], &[damage])?;
+        draw_render_elements::<GlesRenderer, _, _>(&mut frame, 1.0, &[elem], &damage)?;
     }
 
     let _ = frame.finish()?;
-    Ok(())
+    state.finish_frame_damage_state(pointer);
+    perf::record_frame_rendered(timer.elapsed_ms(), damage.len(), full_damage);
+    Ok(damage)
 }
