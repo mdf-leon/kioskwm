@@ -44,8 +44,8 @@ use crate::{
     overlay::OverlayControl,
     render::{render_kiosk_frame, send_frame_callbacks},
     spawn::{
-        bind_wayland_socket, command_exists, log_bound_socket, prepare_runtime_files,
-        resolve_terminal, schedule_spawn,
+        bind_wayland_socket, log_bound_socket, prepare_runtime_files, resolve_spawn,
+        schedule_spawn,
     },
     state::{accept_clients, accept_clients_rounds, init_state, new_exit_flag, should_exit, State},
 };
@@ -232,14 +232,7 @@ impl TtyLoop {
 pub fn run(args: Args, i18n: crate::i18n::I18n) -> Result<(), Box<dyn std::error::Error>> {
     ensure_tty_env()?;
 
-    let terminal = resolve_terminal(&args.terminal);
-    if !args.no_spawn && !command_exists(&terminal) {
-        return Err(format!(
-            "Terminal '{terminal}' não encontrado no PATH.\n\
-             Instale alacritty/foot ou passe outro com -t NOME"
-        )
-        .into());
-    }
+    let spawn_plan = resolve_spawn(&args);
 
     let (session, session_notifier) = LibSeatSession::new().map_err(|err| {
         format!(
@@ -320,9 +313,7 @@ pub fn run(args: Args, i18n: crate::i18n::I18n) -> Result<(), Box<dyn std::error
     ));
     kill_switch::spawn(emergency.clone(), mod_tracker, hardware.clone());
 
-    if !args.no_spawn {
-        schedule_spawn(terminal, socket_name, args.spawn_delay_ms);
-    }
+    schedule_spawn(spawn_plan, socket_name, args.spawn_delay_ms);
 
     let session_for_loop = session.clone();
     let mut libinput =

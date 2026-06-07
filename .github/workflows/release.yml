@@ -1,0 +1,41 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Instalar dependências de build
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential pkg-config \
+            libseat-dev libinput-dev libudev-dev libxkbcommon-dev \
+            libgbm-dev libdrm-dev libegl1-mesa-dev libwayland-dev
+
+      - name: Build release
+        run: cargo build --release
+
+      - name: Empacotar binário
+        run: |
+          cp target/release/kioskwm kioskwm-x86_64-unknown-linux-gnu
+          sha256sum kioskwm-x86_64-unknown-linux-gnu > kioskwm-x86_64-unknown-linux-gnu.sha256
+          cat kioskwm-x86_64-unknown-linux-gnu.sha256
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            kioskwm-x86_64-unknown-linux-gnu
+            kioskwm-x86_64-unknown-linux-gnu.sha256
+          generate_release_notes: true

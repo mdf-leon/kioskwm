@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>kioskwm — documentation</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #1a1d21;
+      --fg: #eff0f1;
+      --muted: #bdc3c7;
+      --accent: #3daee9;
+      --border: #464a4f;
+      --code-bg: #232629;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: system-ui, -apple-system, sans-serif;
+      background: var(--bg);
+      color: var(--fg);
+      line-height: 1.65;
+    }
+    a { color: var(--accent); }
+    header {
+      border-bottom: 1px solid var(--border);
+      padding: 2rem 1.5rem 1.5rem;
+      background: #232629;
+    }
+    header h1 { margin: 0 0 .25rem; font-size: 2rem; }
+    header p { margin: 0; color: var(--muted); }
+    nav {
+      display: flex;
+      flex-wrap: wrap;
+      gap: .75rem 1.25rem;
+      margin-top: 1rem;
+      font-size: .95rem;
+    }
+    main {
+      max-width: 820px;
+      margin: 0 auto;
+      padding: 2rem 1.5rem 4rem;
+    }
+    section { margin: 2.5rem 0; scroll-margin-top: 1rem; }
+    h2 { font-size: 1.45rem; margin: 0 0 .75rem; border-bottom: 1px solid var(--border); padding-bottom: .35rem; }
+    h3 { font-size: 1.1rem; margin: 1.5rem 0 .5rem; color: var(--accent); }
+    p, li { color: #d8dcdf; }
+    ul, ol { padding-left: 1.25rem; }
+    code, pre { background: var(--code-bg); border-radius: 8px; }
+    code { padding: .12rem .35rem; font-size: .92em; }
+    pre {
+      padding: 1rem;
+      overflow-x: auto;
+      border: 1px solid var(--border);
+      margin: .75rem 0;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: .95rem;
+      margin: .75rem 0;
+    }
+    th, td {
+      border: 1px solid var(--border);
+      padding: .55rem .7rem;
+      text-align: left;
+      vertical-align: top;
+    }
+    th { background: #232629; }
+    .note {
+      border-left: 3px solid var(--accent);
+      padding: .75rem 1rem;
+      background: #232629;
+      border-radius: 0 8px 8px 0;
+      margin: 1rem 0;
+    }
+    .warn { border-left-color: #da4453; }
+    kbd {
+      background: #31363b;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: .1rem .35rem;
+      font-size: .85em;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>kioskwm</h1>
+    <p>Wayland compositor for kiosk deployments and nested desktop testing.</p>
+    <nav>
+      <a href="#install">Install</a>
+      <a href="#usage">Usage</a>
+      <a href="#shortcuts">Shortcuts</a>
+      <a href="#deps">Dependencies</a>
+      <a href="#distros">Distros</a>
+      <a href="#server">Server images</a>
+      <a href="#uninstall">Uninstall</a>
+      <a href="https://github.com/mdf-leon/kioskwm">GitHub</a>
+    </nav>
+  </header>
+
+  <main>
+    <section id="install">
+      <h2>Install</h2>
+      <p>Ubuntu / Debian, <strong>x86_64</strong>:</p>
+      <pre><code>curl -fsSL https://raw.githubusercontent.com/mdf-leon/kioskwm/main/install/install.sh | bash</code></pre>
+      <p>Pin a version:</p>
+      <pre><code>curl -fsSL https://raw.githubusercontent.com/mdf-leon/kioskwm/main/install/install.sh | bash -s -- --version v0.1.0</code></pre>
+      <p>After install, <code>kioskwm</code> is available at <code>/usr/local/bin/kioskwm</code>.</p>
+    </section>
+
+    <section id="usage">
+      <h2>Usage</h2>
+
+      <h3>Nested mode (development / testing on KDE, GNOME, etc.)</h3>
+      <p>Runs inside a window using the parent compositor (Plasma, etc.). Ideal for hacking in Konsole:</p>
+      <pre><code>kioskwm --desktop</code></pre>
+      <p>By default it auto-spawns an app: any terminal emulator found on PATH, or nothing if none is installed (no error).</p>
+
+      <h3>TTY / kiosk mode (production)</h3>
+      <p>Fullscreen compositor on the GPU (DRM + libseat). Auto-detected on a hardware VT (<code>/dev/tty1</code>, <code>tty2</code>, …):</p>
+      <pre><code># on a dedicated tty, e.g. after login or autologin
+kioskwm</code></pre>
+      <div class="note warn">
+        <strong>Important:</strong> kioskwm <em>is</em> the Wayland compositor. You do not need Plasma, GNOME, or an existing Wayland session in TTY mode — only kernel + DRM, libseat, and the dependencies below.
+      </div>
+
+      <h3>CLI flags</h3>
+      <table>
+        <thead><tr><th>Flag</th><th>Description</th></tr></thead>
+        <tbody>
+          <tr><td><code>--desktop</code></td><td>Force nested (winit) mode, even on a TTY.</td></tr>
+          <tr><td><code>--no-spawn</code></td><td>Do not spawn an app automatically at startup.</td></tr>
+          <tr><td><code>-a CMD</code></td><td>App to spawn (<code>auto</code>, <code>foot</code>, <code>firefox</code>, <code>firefox --kiosk URL</code>, …).</td></tr>
+          <tr><td><code>--lang pt</code></td><td>WM UI language (<code>en</code>, <code>pt</code>).</td></tr>
+          <tr><td><code>--spawn-delay-ms N</code></td><td>Delay before spawning (default 300 ms).</td></tr>
+          <tr><td><code>--help</code> / <code>--version</code></td><td>Help and version.</td></tr>
+        </tbody>
+      </table>
+
+      <h3>Environment variables</h3>
+      <table>
+        <thead><tr><th>Variable</th><th>Description</th></tr></thead>
+        <tbody>
+          <tr><td><code>KIOSKWM_APP</code></td><td>Preferred app for <code>-a auto</code> (any command).</td></tr>
+          <tr><td><code>KIOSKWM_TERMINAL</code> / <code>TERMINAL</code></td><td>Legacy alias for <code>KIOSKWM_APP</code>.</td></tr>
+          <tr><td><code>KIOSKWM_LANG</code></td><td>UI language (<code>pt</code>, <code>en</code>).</td></tr>
+          <tr><td><code>KIOSKWM_LOG</code></td><td>Log file path (default <code>/tmp/kioskwm.log</code>).</td></tr>
+          <tr><td><code>RUST_LOG</code></td><td>Rust log level (e.g. <code>kioskwm=debug</code>).</td></tr>
+          <tr><td><code>KIOSKWM_PERF=1</code></td><td>Performance metrics in the log.</td></tr>
+          <tr><td><code>XDG_RUNTIME_DIR</code></td><td>Required on Linux; Wayland socket lives here.</td></tr>
+        </tbody>
+      </table>
+
+      <h3>Logs</h3>
+      <pre><code>tail -f /tmp/kioskwm.log</code></pre>
+    </section>
+
+    <section id="shortcuts">
+      <h2>Keyboard shortcuts</h2>
+
+      <h3>P1 — settings panel (macOS-style menu)</h3>
+      <table>
+        <thead><tr><th>Shortcut</th><th>Action</th></tr></thead>
+        <tbody>
+          <tr><td><kbd>Ctrl</kbd> + <kbd>Alt</kbd> + <kbd>Del</kbd></td><td>Toggle P1 panel</td></tr>
+          <tr><td><kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>Esc</kbd></td><td>Toggle P1 panel</td></tr>
+          <tr><td><kbd>Super</kbd> + <kbd>Esc</kbd></td><td>Toggle P1 panel</td></tr>
+        </tbody>
+      </table>
+      <p>In the panel: use the mouse to navigate; <kbd>Esc</kbd> closes; footer actions quit the WM, shut down, or reboot.</p>
+
+      <h3>P0 — emergency / system</h3>
+      <table>
+        <thead><tr><th>Shortcut</th><th>Action</th></tr></thead>
+        <tbody>
+          <tr><td><kbd>Ctrl</kbd> + <kbd>Alt</kbd> + <kbd>Shift</kbd> + <kbd>Del</kbd></td><td>Force quit kioskwm</td></tr>
+          <tr><td><kbd>Ctrl</kbd> + <kbd>Alt</kbd> + <kbd>F1</kbd>…<kbd>F12</kbd></td><td>Switch VT (console)</td></tr>
+          <tr><td><kbd>Ctrl</kbd> + <kbd>Alt</kbd> + <kbd>1</kbd>…<kbd>9</kbd>, <kbd>0</kbd></td><td>Switch VT (<kbd>0</kbd> = tty10)</td></tr>
+        </tbody>
+      </table>
+
+      <h3>Apps and windows</h3>
+      <table>
+        <thead><tr><th>Shortcut</th><th>Action</th></tr></thead>
+        <tbody>
+          <tr><td><kbd>Alt</kbd> + <kbd>Tab</kbd></td><td>Cycle apps (release <kbd>Alt</kbd> to confirm)</td></tr>
+          <tr><td><kbd>Alt</kbd> + <kbd>Shift</kbd> + <kbd>Tab</kbd></td><td>Cycle apps (reverse)</td></tr>
+          <tr><td><kbd>Esc</kbd> (Alt+Tab open)</td><td>Cancel Alt+Tab</td></tr>
+          <tr><td><kbd>Alt</kbd> + <kbd>F4</kbd></td><td>Close focused app</td></tr>
+          <tr><td><kbd>Super</kbd> + right click</td><td>WM menu (app list, close, open settings)</td></tr>
+        </tbody>
+      </table>
+
+      <h3>Inside the P1 panel (keyboard)</h3>
+      <table>
+        <thead><tr><th>Key</th><th>Action</th></tr></thead>
+        <tbody>
+          <tr><td><kbd>Esc</kbd></td><td>Close panel (main screen) or go back (mouse screen)</td></tr>
+          <tr><td><kbd>←</kbd> <kbd>→</kbd> <kbd>+</kbd> <kbd>−</kbd></td><td>Adjust pointer speed (mouse screen)</td></tr>
+          <tr><td><kbd>Enter</kbd> / <kbd>Esc</kbd></td><td>Confirm / cancel shutdown or reboot dialogs</td></tr>
+        </tbody>
+      </table>
+
+      <div class="note">
+        In nested mode (<code>--desktop</code>), the parent compositor (KDE/KWin) may steal global shortcuts. kioskwm tries to inhibit that; if it fails, the evdev fallback still catches P0/P1.
+      </div>
+    </section>
+
+    <section id="deps">
+      <h2>Dependencies</h2>
+
+      <h3>Runtime (installed by <code>install.sh</code>)</h3>
+      <pre><code>libseat1 libinput10 libgbm1 libxkbcommon0 libudev1 libdrm2 \
+libwacom9 libevdev2 libmtdev1t64 xwayland</code></pre>
+      <p><strong>XWayland</strong> (<code>xwayland</code>) is required for X11 apps (Kate, Krita snap, etc.). Native Wayland apps work without X.</p>
+
+      <h3>Build (from source)</h3>
+      <pre><code>sudo apt install build-essential pkg-config \
+  libseat-dev libinput-dev libudev-dev libxkbcommon-dev \
+  libgbm-dev libdrm-dev libegl1-mesa-dev libwayland-dev
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+cargo build --release</code></pre>
+
+      <h3>Recommended extras for kiosks</h3>
+      <ul>
+        <li><strong>Terminal:</strong> <code>konsole</code>, <code>alacritty</code>, <code>foot</code>, … (auto-spawn)</li>
+        <li><strong>GPU driver:</strong> Mesa (<code>mesa-utils</code>) or proprietary driver as needed</li>
+        <li><strong>Cursors/fonts:</strong> cursor theme (<code>breeze-cursor-theme</code> or <code>adwaita-icon-theme</code>)</li>
+        <li><strong>systemd:</strong> for shutdown/reboot from the P1 panel</li>
+      </ul>
+    </section>
+
+    <section id="distros">
+      <h2>Supported distros</h2>
+      <table>
+        <thead><tr><th>Distro</th><th>curl install</th><th>Notes</th></tr></thead>
+        <tbody>
+          <tr>
+            <td>Ubuntu 22.04 / 24.04+</td>
+            <td>Yes (<code>install.sh</code>)</td>
+            <td>Tested; release binary built against a recent glibc.</td>
+          </tr>
+          <tr>
+            <td>Debian 12+</td>
+            <td>Likely</td>
+            <td>Same deps; script handles <code>libmtdev1</code> vs <code>libmtdev1t64</code>.</td>
+          </tr>
+          <tr>
+            <td>Fedora / Arch / others</td>
+            <td>Not yet</td>
+            <td>Build from source or wait for future packaging.</td>
+          </tr>
+        </tbody>
+      </table>
+      <p>Architecture: <strong>x86_64</strong> only for the curl installer today.</p>
+    </section>
+
+    <section id="server">
+      <h2>Server / minimal images (no Wayland preinstalled)</h2>
+      <p>Cloud images and “server” ISOs usually ship <strong>without</strong> a desktop, Wayland, or a display manager. That’s expected — kioskwm replaces the whole compositor stack.</p>
+
+      <h3>What to install</h3>
+      <pre><code># minimal graphics base + kioskwm
+curl -fsSL https://raw.githubusercontent.com/mdf-leon/kioskwm/main/install/install.sh | bash
+
+# optional — terminal OR any Wayland kiosk app
+sudo apt install -y foot              # lightweight terminal
+# sudo apt install -y firefox-esr     # browser kiosk with -a firefox
+
+# GPU driver and utils (Intel/AMD; adjust for NVIDIA)
+sudo apt install -y mesa-utils libgl1</code></pre>
+      <p>With <code>-a auto</code> (default), kioskwm tries <code>foot</code>, <code>alacritty</code>, <code>konsole</code>, … If none is installed, it continues in <strong>no-spawn</strong> mode (no error) and shows a console-style background until a client connects.</p>
+
+      <h3>What to configure</h3>
+      <ol>
+        <li>
+          <strong><code>XDG_RUNTIME_DIR</code></strong> — required. Example systemd unit:
+          <pre><code># /etc/systemd/system/kioskwm.service
+[Service]
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+User=kiosk
+PAMName=login
+TTYPath=/dev/tty1
+StandardInput=tty
+StandardOutput=journal
+ExecStart=/usr/local/bin/kioskwm -a firefox --kiosk https://example.com
+Restart=on-failure</code></pre>
+        </li>
+        <li><strong>Autologin on a TTY</strong> — override <code>getty@tty1</code> or use a kiosk user whose shell runs <code>kioskwm</code>.</li>
+        <li><strong>Permissions</strong> — user needs DRM/libseat access (often <code>video</code>, <code>input</code>, <code>seat</code> groups).</li>
+        <li><strong>Apps</strong> — kioskwm sets <code>WAYLAND_DISPLAY</code>; clients connect to the socket it creates (name appears in the log).</li>
+        <li><strong>SSH headless</strong> — use another TTY (<kbd>Ctrl+Alt+F2</kbd>) or SSH; kioskwm owns tty1 with DRM.</li>
+      </ol>
+
+      <div class="note warn">
+        <strong>Not required:</strong> Plasma, GNOME, GDM/SDDM, or a “desktop” image.<br>
+        <strong>Required:</strong> GPU with KMS/DRM, <code>libseat</code>, input (<code>libinput</code>), and ideally working <code>systemd-logind</code> or a libseat session.
+      </div>
+
+      <h3>Quick checklist on a clean Ubuntu Server</h3>
+      <pre><code>sudo apt update
+curl -fsSL https://raw.githubusercontent.com/mdf-leon/kioskwm/main/install/install.sh | bash
+sudo apt install -y mesa-utils
+# kioskwm alone is enough — console-style screen if no terminal installed
+# autologin + ExecStart=kioskwm on tty1
+# reboot and test</code></pre>
+    </section>
+
+    <section id="uninstall">
+      <h2>Uninstall</h2>
+      <pre><code># remove the binary
+sudo rm -f /usr/local/bin/kioskwm
+
+# optional — deps installed by the script (may be used elsewhere)
+sudo apt remove -y libseat1 libinput10 libgbm1 libxkbcommon0 libudev1 \
+  libdrm2 libwacom9 libevdev2 xwayland</code></pre>
+      <p>Logs and runtime sockets:</p>
+      <pre><code>rm -f /tmp/kioskwm.log
+rm -rf /run/user/$(id -u)/wayland-*   # caution: removes user wayland sockets</code></pre>
+    </section>
+  </main>
+</body>
+</html>

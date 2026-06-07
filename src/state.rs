@@ -34,6 +34,11 @@ pub struct WmBackdropCache {
     pub size: (i32, i32),
 }
 
+pub struct ConsoleBackdropCache {
+    pub buffer: MemoryRenderBuffer,
+    pub size: (i32, i32),
+}
+
 use smithay::{
     backend::{
         allocator::{dmabuf::Dmabuf, format::FormatSet, Buffer},
@@ -117,6 +122,8 @@ pub struct State {
     pub x11_autofocus_idx: Option<usize>,
     /// apply_focus adiado enquanto menu/painel WM estão abertos.
     pub deferred_focus: bool,
+    /// App recém-aberta aguardando foco após fechar overlay WM (índice unificado).
+    pub pending_autofocus: Option<usize>,
     pub xwayland_shell_state: XWaylandShellState,
     pub xwayland_keyboard_grab_state: XWaylandKeyboardGrabState,
     pub xwm: Option<X11Wm>,
@@ -145,6 +152,9 @@ pub struct State {
     /// Snapshot da app congelada atrás de overlay/menu WM.
     pub(crate) wm_backdrop: Mutex<Option<WmBackdropCache>>,
     pub(crate) wm_backdrop_stale: bool,
+    /// Fundo estilo console quando nenhuma app está aberta (modo TTY, no-spawn).
+    pub console_backdrop_enabled: bool,
+    pub console_backdrop_cache: Mutex<Option<ConsoleBackdropCache>>,
     /// Apps recentes (índices unificados) para Alt+Tab.
     pub app_mru: Vec<usize>,
     pub i18n: crate::i18n::I18n,
@@ -535,7 +545,7 @@ impl State {
         self.configure_toplevel(surface, true);
     }
 
-    fn configure_toplevel(&mut self, surface: &ToplevelSurface, activated: bool) {
+    pub(crate) fn configure_toplevel(&mut self, surface: &ToplevelSurface, activated: bool) {
         let size = self.output_size;
         surface.with_pending_state(|state| {
             state.size = Some(size);
@@ -619,10 +629,7 @@ impl XdgShellHandler for State {
         let name = crate::apps::display_name(&surface);
         let index = self.running_apps.len();
         let is_first = index == 0;
-        tracing::info!(
-            "Nova app: {name} (índice {index}, foco={})",
-            if is_first { "sim" } else { "background" }
-        );
+        tracing::info!("Nova app: {name} (índice {index})");
         if is_first {
             self.configure_kiosk(&surface);
         } else {
@@ -632,15 +639,7 @@ impl XdgShellHandler for State {
             surface: surface.clone(),
             display_name: name.clone(),
         });
-        if is_first {
-            self.focused_is_x11 = false;
-            self.focused_app = index;
-            self.touch_mru(self.unified_focus_index());
-            self.apply_focus();
-        } else {
-            let foco = self.unified_app_name(self.unified_focus_index());
-            tracing::info!("Nova app em background: {name} — foco mantém {foco}");
-        }
+        self.autofocus_new_unified(index, &name);
         self.sync_app_mru();
         crate::alt_tab::invalidate_cache(self);
     }
@@ -1019,6 +1018,7 @@ pub fn init_state(
         x11_input_wanted: false,
         x11_autofocus_idx: None,
         deferred_focus: false,
+        pending_autofocus: None,
         xwayland_shell_state: XWaylandShellState::new::<State>(dh),
         xwayland_keyboard_grab_state: XWaylandKeyboardGrabState::new::<State>(dh),
         xwm: None,
@@ -1042,6 +1042,8 @@ pub fn init_state(
         alt_tab_cache: Mutex::new(None),
         wm_backdrop: Mutex::new(None),
         wm_backdrop_stale: false,
+        console_backdrop_enabled: output_model == "tty",
+        console_backdrop_cache: Mutex::new(None),
         app_mru: Vec::new(),
         i18n,
         mod_tracker,

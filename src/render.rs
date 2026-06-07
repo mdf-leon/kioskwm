@@ -198,6 +198,12 @@ pub fn render_kiosk_frame(
         None
     };
 
+    let console_bg = if crate::console_backdrop::wants(state) {
+        crate::console_backdrop::prepare_element(renderer, state, size)?
+    } else {
+        None
+    };
+
     let clear_color = Color32F::new(0.08, 0.08, 0.08, 1.0);
 
     let mut frame = renderer.render(target, size, transform)?;
@@ -206,6 +212,9 @@ pub fn render_kiosk_frame(
         if let Some(scrim) = overlay_scrim {
             draw_render_elements::<GlesRenderer, _, _>(&mut frame, 1.0, &[scrim], &damage)?;
         }
+    } else if let Some(bg) = console_bg {
+        draw_render_elements::<GlesRenderer, _, _>(&mut frame, 1.0, &[bg], &damage)?;
+        draw_render_elements::<GlesRenderer, _, _>(&mut frame, 1.0, &elements, &damage)?;
     } else {
         frame.clear(clear_color, &damage)?;
         draw_render_elements::<GlesRenderer, _, _>(&mut frame, 1.0, &elements, &damage)?;

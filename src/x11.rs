@@ -39,12 +39,24 @@ impl XWaylandShellHandler for State {
             return;
         };
         tracing::info!("X11 wl_surface associada: {}", self.x11_apps[idx].display_name);
-        if self.focused_is_x11 && self.focused_x11 == idx && self.x11_input_wanted {
-            self.x11_focus_pending = false;
-            if !self.context_menu.open && !self.overlay_open && !self.alt_tab.open {
-                self.apply_focus();
-            } else {
+        if self.x11_autofocus_idx == Some(idx) {
+            let name = self.x11_apps[idx].display_name.clone();
+            let unified = self.running_apps.len() + idx;
+            self.x11_autofocus_idx = None;
+            if self.wm_ui_blocks_focus() {
+                self.pending_autofocus = Some(unified);
                 self.deferred_focus = true;
+                tracing::info!("X11 {name}: wl_surface pronta — foco adiado (UI WM aberta)");
+            } else {
+                tracing::info!("X11 {name}: wl_surface pronta — foco automático");
+                self.focus_x11(idx);
+            }
+        } else if self.focused_is_x11 && self.focused_x11 == idx && self.x11_input_wanted {
+            self.x11_focus_pending = false;
+            if self.wm_ui_blocks_focus() {
+                self.deferred_focus = true;
+            } else {
+                self.apply_focus();
             }
         }
         crate::context_menu::invalidate_cache(self);
@@ -81,8 +93,6 @@ impl XwmHandler for State {
         };
         if is_new {
             self.sync_app_mru();
-            let foco = self.unified_app_name(self.unified_focus_index());
-            tracing::info!("X11 {name}: registrada em background — foco mantém {foco}");
         }
         crate::alt_tab::invalidate_cache(self);
     }
@@ -106,14 +116,17 @@ impl XwmHandler for State {
             {
                 self.x11_focus_pending = false;
                 self.apply_focus();
-            } else if self.x11_autofocus_idx == Some(idx)
-                && !self.context_menu.open
-                && !self.overlay_open
-                && !self.alt_tab.open
-            {
+            } else if self.x11_autofocus_idx == Some(idx) {
+                let unified = self.running_apps.len() + idx;
                 self.x11_autofocus_idx = None;
-                tracing::info!("X11 {name}: primeira map — ativando foco e input");
-                self.focus_x11(idx);
+                if self.wm_ui_blocks_focus() {
+                    self.pending_autofocus = Some(unified);
+                    self.deferred_focus = true;
+                    tracing::info!("X11 {name}: mapeada — foco adiado (UI WM aberta)");
+                } else {
+                    tracing::info!("X11 {name}: mapeada — foco automático");
+                    self.focus_x11(idx);
+                }
             }
         }
     }

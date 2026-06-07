@@ -1,2 +1,6 @@
 /target
 .cursor/
+/log
+
+# Local QEMU lab (ISOs, scripts, disks — not committed)
+/qemu/
