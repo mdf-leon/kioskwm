@@ -162,6 +162,7 @@ impl crate::state::State {
         let seat = self.seat.clone();
         let serial = self.next_serial();
         KeyboardTarget::leave(&x11_surface, &seat, self, serial);
+        let _ = x11_surface.set_activated(false);
     }
 
     fn leave_wayland_input(&mut self) {
@@ -177,7 +178,71 @@ impl crate::state::State {
 
     /// Reenvia ponteiro/teclado à app focada (após menu WM, etc.).
     pub fn sync_input_to_focus(&mut self) {
-        self.apply_focus();
+        self.resync_input_after_overlay();
+    }
+
+    /// Bloqueia teclado dos clientes enquanto overlay WM (Alt+Tab, etc.) está aberto.
+    pub fn suspend_client_keyboard_for_wm_ui(&mut self) {
+        self.release_keyboard_grab();
+        let keyboard = self.keyboard.clone();
+        let serial = self.next_serial();
+        keyboard.set_focus(self, None, serial);
+    }
+
+    /// Restaura teclado/mouse/modificadores após Alt+Tab, menu WM, etc.
+    pub fn resync_input_after_overlay(&mut self) {
+        self.deferred_focus = false;
+        self.dismiss_popup_grab();
+        self.release_keyboard_grab();
+        let keyboard = self.keyboard.clone();
+        let serial = self.next_serial();
+        keyboard.set_focus(self, None, serial);
+        self.dispatch_input_focus();
+        self.refresh_active_surface();
+        self.push_modifiers_to_focus();
+    }
+
+    fn release_keyboard_grab(&mut self) {
+        if !self.keyboard.is_grabbed() {
+            return;
+        }
+        let keyboard = self.keyboard.clone();
+        keyboard.unset_grab(self);
+    }
+
+    fn sync_keyboard_enter(&mut self, surface: &WlSurface) {
+        let keyboard = self.keyboard.clone();
+        let seat = self.seat.clone();
+        let mods = keyboard.modifier_state();
+        let enter_serial = self.next_serial();
+        keyboard.with_pressed_keysyms(|keys| {
+            KeyboardTarget::enter(surface, &seat, self, keys, enter_serial);
+        });
+        let mod_serial = self.next_serial();
+        KeyboardTarget::modifiers(surface, &seat, self, mods, mod_serial);
+    }
+
+    /// X11 (Kate/Krita): precisa de WM_TAKE_FOCUS, não só wl_keyboard.enter.
+    fn sync_x11_keyboard_enter(&mut self, x11_surface: &X11Surface) {
+        let keyboard = self.keyboard.clone();
+        let seat = self.seat.clone();
+        let mods = keyboard.modifier_state();
+        let enter_serial = self.next_serial();
+        keyboard.with_pressed_keysyms(|keys| {
+            KeyboardTarget::enter(x11_surface, &seat, self, keys, enter_serial);
+        });
+        let mod_serial = self.next_serial();
+        KeyboardTarget::modifiers(x11_surface, &seat, self, mods, mod_serial);
+    }
+
+    fn push_modifiers_to_focus(&mut self) {
+        let mods = self.keyboard.modifier_state();
+        let seat = self.seat.clone();
+        let serial = self.next_serial();
+        let Some((surface, _)) = self.pointer_focus() else {
+            return;
+        };
+        KeyboardTarget::modifiers(&surface, &seat, self, mods, serial);
     }
 
     pub fn unified_focus_index(&self) -> usize {
@@ -300,6 +365,7 @@ impl crate::state::State {
             && self.focused_x11 == index
             && self.x11_input_active()
         {
+            self.apply_focus();
             return;
         }
 
@@ -404,6 +470,7 @@ impl crate::state::State {
     }
 
     fn dispatch_input_focus(&mut self) {
+        self.release_keyboard_grab();
         if self.focused_is_x11 && self.x11_input_wanted {
             if self.try_apply_x11_focus() {
                 return;
@@ -440,6 +507,7 @@ impl crate::state::State {
         let seat = self.seat.clone();
         let focus_serial = self.next_serial();
         keyboard.set_focus(self, Some(wl_surface.clone()), focus_serial);
+        self.sync_x11_keyboard_enter(&x11_surface);
         let motion = MotionEvent {
             location: self.pointer_pos,
             serial: self.next_serial(),
@@ -472,19 +540,18 @@ impl crate::state::State {
         let name = app.display_name.clone();
         let keyboard = self.keyboard.clone();
         let pointer = self.pointer.clone();
+        let seat = self.seat.clone();
         let focus_serial = self.next_serial();
         keyboard.set_focus(self, Some(wl_surface.clone()), focus_serial);
+        self.sync_keyboard_enter(&wl_surface);
         let origin = self.surface_origin_for(&wl_surface);
-        let motion_serial = self.next_serial();
-        pointer.motion(
-            self,
-            Some((wl_surface, origin)),
-            &MotionEvent {
-                location: self.pointer_pos,
-                serial: motion_serial,
-                time: 0,
-            },
-        );
+        let motion = MotionEvent {
+            location: self.pointer_pos,
+            serial: self.next_serial(),
+            time: 0,
+        };
+        PointerTarget::enter(&wl_surface, &seat, self, &motion);
+        pointer.motion(self, Some((wl_surface, origin)), &motion);
         pointer.frame(self);
         tracing::info!("Foco ativo → Wayland {name}");
     }

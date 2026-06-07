@@ -59,7 +59,7 @@ pub fn close(state: &mut State) {
     state.context_menu.open = false;
     state.context_menu.hover = None;
     invalidate_cache(state);
-    state.flush_deferred_focus();
+    state.resync_input_after_overlay();
 }
 
 pub fn handle_pointer_button(
