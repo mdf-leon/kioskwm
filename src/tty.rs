@@ -38,9 +38,9 @@ use wayland_server::ListeningSocket;
 use crate::{
     cursor::PointerCursor,
     input::{handle_input, PointerTracker},
-    render::{render_kiosk_frame, send_frames_surface_tree},
+    render::{render_kiosk_frame, send_frame_callbacks},
     spawn::{command_exists, resolve_terminal, schedule_spawn},
-    state::{accept_clients, init_state, new_exit_flag, should_exit, State},
+    state::{accept_clients, accept_clients_rounds, init_state, new_exit_flag, should_exit, State},
 };
 use crate::Args;
 
@@ -155,6 +155,10 @@ impl TtyLoop {
             return;
         };
 
+        if let Err(err) = accept_clients(&mut self.display, &mut self.state, &self.listener) {
+            tracing::warn!("wayland dispatch: {}", err);
+        }
+
         let render_result = (|| -> Result<(), Box<dyn std::error::Error>> {
             let mut target = self.renderer.bind(&mut dmabuf)?;
             render_kiosk_frame(
@@ -180,15 +184,16 @@ impl TtyLoop {
             tracing::warn!("queue_buffer falhou: {}", err);
         }
 
-        for surface in self.state.xdg_shell_state.toplevel_surfaces() {
-            send_frames_surface_tree(
-                surface.wl_surface(),
-                self.start_time.elapsed().as_millis() as u32,
-            );
-        }
+        send_frame_callbacks(
+            &mut self.state,
+            self.start_time.elapsed().as_millis() as u32,
+        );
 
-        if let Err(err) = accept_clients(&mut self.display, &mut self.state, &self.listener) {
-            tracing::warn!("wayland dispatch: {}", err);
+        let rounds = if self.state.active_popup.is_some() { 10 } else { 2 };
+        if let Err(err) =
+            accept_clients_rounds(&mut self.display, &mut self.state, &self.listener, rounds)
+        {
+            tracing::warn!("wayland dispatch pós-frame: {}", err);
         }
 
         stop_loop(self);
@@ -244,13 +249,13 @@ pub fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         drm_surface,
         allocator,
         COLOR_FORMATS,
-        renderer_formats,
+        renderer_formats.clone(),
     )?;
 
     let display: Display<State> = Display::new()?;
     let dh = display.handle();
     let exit_requested = new_exit_flag();
-    let state = init_state(
+    let mut state = init_state(
         &dh,
         "kioskwm",
         "tty",
@@ -258,6 +263,7 @@ pub fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         output.monitor_mm,
         exit_requested,
     )?;
+    state.register_dmabuf_formats(renderer_formats.clone());
 
     let listener = ListeningSocket::bind_auto("kioskwm", 0..32)?;
     let socket_name = listener

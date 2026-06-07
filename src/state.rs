@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     os::unix::io::OwnedFd,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -7,51 +8,77 @@ use std::{
 };
 
 use smithay::{
-    delegate_compositor, delegate_data_device, delegate_output, delegate_seat, delegate_shm,
-    delegate_xdg_shell,
+    backend::{
+        allocator::{dmabuf::Dmabuf, format::FormatSet, Buffer},
+        renderer::{buffer_dimensions, buffer_type},
+    },
+    delegate_compositor, delegate_data_device, delegate_dmabuf, delegate_output,
+    delegate_primary_selection, delegate_seat, delegate_shm, delegate_xdg_shell,
+    desktop::{PopupKind, PopupManager, PopupPointerGrab},
     input::{
         keyboard::KeyboardHandle,
-        pointer::{MotionEvent, PointerHandle},
+        pointer::{Focus, MotionEvent, PointerHandle},
         Seat, SeatHandler, SeatState,
     },
     output::{Mode, Output, PhysicalProperties, Scale, Subpixel},
     reexports::wayland_server::{protocol::wl_seat, Display, DisplayHandle},
-    utils::{Logical, Point, Serial, Size},
+    utils::{Logical, Point, Rectangle, Serial, Size},
     wayland::{
         buffer::BufferHandler,
         compositor::{
-            CompositorClientState, CompositorHandler, CompositorState,
+            with_states, with_surface_tree_downward, BufferAssignment, CompositorClientState,
+            CompositorHandler, CompositorState, SurfaceAttributes, TraversalAction,
         },
+        dmabuf::{DmabufGlobal, DmabufHandler, DmabufState, ImportNotifier},
         output::{OutputHandler, OutputManagerState},
         selection::{
-            data_device::{ClientDndGrabHandler, DataDeviceHandler, DataDeviceState, ServerDndGrabHandler},
+            data_device::{
+                set_data_device_focus, ClientDndGrabHandler, DataDeviceHandler, DataDeviceState,
+                ServerDndGrabHandler,
+            },
+            primary_selection::{
+                set_primary_focus, PrimarySelectionHandler, PrimarySelectionState,
+            },
             SelectionHandler,
         },
-        shell::xdg::{PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState},
+        shell::xdg::{
+            PopupSurface, PositionerState, SurfaceCachedState, ToplevelSurface, XdgShellHandler,
+            XdgShellState, XDG_POPUP_ROLE,
+        },
         shm::{ShmHandler, ShmState},
     },
 };
 use wayland_protocols::xdg::shell::server::xdg_toplevel;
 use wayland_server::{
-    backend::{ClientData, ClientId, DisconnectReason},
+    backend::{ClientData, ClientId, DisconnectReason, ObjectId},
     protocol::{
         wl_buffer,
         wl_surface::WlSurface,
     },
-    Client, ListeningSocket,
+    Client, ListeningSocket, Resource,
 };
 
 pub struct State {
     pub compositor_state: CompositorState,
     pub xdg_shell_state: XdgShellState,
     pub shm_state: ShmState,
+    pub dmabuf_state: DmabufState,
+    pub _dmabuf_global: Option<DmabufGlobal>,
     pub _output_state: OutputManagerState,
     pub seat_state: SeatState<Self>,
+    pub seat: Seat<Self>,
     pub data_device_state: DataDeviceState,
+    pub primary_selection_state: PrimarySelectionState,
+    pub display_handle: DisplayHandle,
     pub output: Output,
     pub keyboard: KeyboardHandle<Self>,
     pub pointer: PointerHandle<Self>,
     pub primary_toplevel: Option<ToplevelSurface>,
+    pub active_popup: Option<PopupSurface>,
+    pub popup_manager: PopupManager,
+    /// Posição do popup no espaço do compositor (definida no configure, antes do ack do cliente).
+    popup_render_offsets: HashMap<ObjectId, (i32, i32)>,
+    pub pointer_pos: Point<f64, Logical>,
     pub output_size: Size<i32, Logical>,
     pub exit_requested: Arc<AtomicBool>,
     serial: u32,
@@ -75,10 +102,177 @@ impl State {
         self.serial.into()
     }
 
+    /// Posição do popup no espaço do compositor.
+    /// Usa o valor guardado em configure, que é `geometry.loc` do positioner
+    /// (relativo à superfície do pai = compositor, já que o toplevel está em (0,0)).
+    pub fn popup_compositor_offset(&self, wl: &WlSurface) -> Option<(i32, i32)> {
+        self.popup_render_offsets.get(&wl.id()).copied()
+    }
+
+    pub fn toplevel_window_geometry(&self) -> Rectangle<i32, Logical> {
+        let Some(toplevel) = self.primary_toplevel.as_ref() else {
+            return Rectangle::from_size(self.output_size);
+        };
+        with_states(toplevel.wl_surface(), |states| {
+            states
+                .cached_state
+                .get::<SurfaceCachedState>()
+                .current()
+                .geometry
+                .filter(|g| g.size.w > 0 && g.size.h > 0)
+                .unwrap_or_else(|| Rectangle::from_size(self.output_size))
+        })
+    }
+
+    /// Origem da superfície focada no espaço do compositor (não a posição do cursor).
+    fn surface_origin_for(&self, surface: &WlSurface) -> Point<f64, Logical> {
+        if let Some((ox, oy)) = self.popup_compositor_offset(surface) {
+            return Point::from((ox as f64, oy as f64));
+        }
+        Point::from((0.0, 0.0))
+    }
+
+    fn parent_constraint_rect(&self, popup: &PopupSurface) -> Rectangle<i32, Logical> {
+        popup
+            .get_parent_surface()
+            .map(|parent| {
+                with_states(&parent, |states| {
+                    states
+                        .cached_state
+                        .get::<SurfaceCachedState>()
+                        .current()
+                        .geometry
+                        .filter(|g| g.size.w > 0 && g.size.h > 0)
+                        .unwrap_or_else(|| Rectangle::from_size(self.output_size))
+                })
+            })
+            .unwrap_or_else(|| Rectangle::from_size(self.output_size))
+    }
+
     pub fn pointer_focus(&self) -> Option<(WlSurface, Point<f64, Logical>)> {
-        self.primary_toplevel
-            .as_ref()
-            .map(|toplevel| (toplevel.wl_surface().clone(), Point::from((0.0, 0.0))))
+        let surface = if let Some(popup) = &self.active_popup {
+            popup.wl_surface().clone()
+        } else {
+            self.primary_toplevel.as_ref()?.wl_surface().clone()
+        };
+        let origin = self.surface_origin_for(&surface);
+        Some((surface, origin))
+    }
+
+    fn restore_pointer_to_toplevel(&mut self) {
+        if let Some(toplevel) = &self.primary_toplevel {
+            let wl_surface = toplevel.wl_surface().clone();
+            let pointer = self.pointer.clone();
+            let origin = self.surface_origin_for(&wl_surface);
+            let serial = self.next_serial();
+            pointer.motion(
+                self,
+                Some((wl_surface, origin)),
+                &MotionEvent {
+                    location: self.pointer_pos,
+                    serial,
+                    time: 0,
+                },
+            );
+            pointer.frame(self);
+        }
+    }
+
+    fn restore_toplevel_focus(&mut self) {
+        if let Some(toplevel) = &self.primary_toplevel {
+            let wl_surface = toplevel.wl_surface().clone();
+            let pos = self.pointer_pos;
+            let keyboard = self.keyboard.clone();
+            let pointer = self.pointer.clone();
+            let focus_serial = self.next_serial();
+            let motion_serial = self.next_serial();
+            keyboard.set_focus(self, Some(wl_surface.clone()), focus_serial);
+            let origin = self.surface_origin_for(&wl_surface);
+            pointer.motion(
+                self,
+                Some((wl_surface, origin)),
+                &MotionEvent {
+                    location: pos,
+                    serial: motion_serial,
+                    time: 0,
+                },
+            );
+            pointer.frame(self);
+        }
+    }
+
+    fn configure_popup(&mut self, surface: &PopupSurface, positioner: PositionerState) {
+        // O constraint_rect deve ser o output (em coords da superfície do pai).
+        // geometry.loc do positioner é relativo à superfície do pai, que está em (0,0),
+        // portanto geometry.loc = posição no espaço do compositor.
+        let constraint_rect = Rectangle::from_size(self.output_size);
+        let geometry = positioner.get_unconstrained_geometry(constraint_rect);
+        let compositor_xy = geometry.loc;
+        self.popup_render_offsets
+            .insert(surface.wl_surface().id(), (compositor_xy.x, compositor_xy.y));
+        tracing::info!(
+            "popup pos=({}, {}) size={}x{}",
+            compositor_xy.x,
+            compositor_xy.y,
+            geometry.size.w,
+            geometry.size.h,
+        );
+        surface.with_pending_state(|state| {
+            state.geometry = geometry;
+        });
+        match surface.send_configure() {
+            Ok(_) => tracing::debug!("popup configurado"),
+            Err(err) => tracing::warn!("popup configure: {:?}", err),
+        }
+    }
+
+    pub fn maintain_popups(&mut self) {
+        self.popup_manager.cleanup();
+    }
+
+    fn log_popup_tree(surface: &WlSurface) {
+        let mut nodes = 0u32;
+        let mut mapped = 0u32;
+        with_surface_tree_downward(
+            surface,
+            (),
+            |_, _, &()| TraversalAction::DoChildren(()),
+            |_s, states, &()| {
+                nodes += 1;
+                let mut guard = states.cached_state.get::<SurfaceAttributes>();
+                let attrs = guard.current();
+                let Some(BufferAssignment::NewBuffer(buf)) = &attrs.buffer else {
+                    return;
+                };
+                let Some(dims) = buffer_dimensions(buf) else {
+                    tracing::warn!("popup commit: buffer tipo desconhecido");
+                    return;
+                };
+                mapped += 1;
+                tracing::debug!(
+                    "popup commit: {:?} {}x{}",
+                    buffer_type(buf),
+                    dims.w,
+                    dims.h
+                );
+            },
+            |_, _, &()| true,
+        );
+        if mapped == 0 {
+            tracing::trace!("popup commit sem buffer ({nodes} superfície(s))");
+        }
+    }
+
+    pub fn register_dmabuf_formats(&mut self, formats: FormatSet) {
+        if self._dmabuf_global.is_some() {
+            return;
+        }
+        let formats: Vec<_> = formats.into_iter().collect();
+        tracing::info!("Registrando linux-dmabuf ({} formatos)", formats.len());
+        self._dmabuf_global = Some(
+            self.dmabuf_state
+                .create_global::<Self>(&self.display_handle, formats),
+        );
     }
 
     pub fn configure_kiosk(&mut self, surface: &ToplevelSurface) {
@@ -124,6 +318,24 @@ impl BufferHandler for State {
     fn buffer_destroyed(&mut self, _buffer: &wl_buffer::WlBuffer) {}
 }
 
+impl DmabufHandler for State {
+    fn dmabuf_state(&mut self) -> &mut DmabufState {
+        &mut self.dmabuf_state
+    }
+
+    fn dmabuf_imported(&mut self, _global: &DmabufGlobal, dmabuf: Dmabuf, notifier: ImportNotifier) {
+        tracing::debug!(
+            "dmabuf import {}x{} fmt={:?}",
+            dmabuf.width(),
+            dmabuf.height(),
+            dmabuf.format()
+        );
+        if let Err(err) = notifier.successful::<Self>() {
+            tracing::warn!("dmabuf import falhou: {:?}", err);
+        }
+    }
+}
+
 impl XdgShellHandler for State {
     fn xdg_shell_state(&mut self) -> &mut XdgShellState {
         &mut self.xdg_shell_state
@@ -145,25 +357,86 @@ impl XdgShellHandler for State {
         let focus_serial = self.next_serial();
         let motion_serial = self.next_serial();
         keyboard.set_focus(self, Some(wl_surface.clone()), focus_serial);
+        let origin = self.surface_origin_for(&wl_surface);
         pointer.motion(
             self,
-            Some((wl_surface, Point::from((0.0, 0.0)))),
+            Some((wl_surface.clone(), origin)),
             &MotionEvent {
-                location: Point::from((0.0, 0.0)),
+                location: self.pointer_pos,
                 serial: motion_serial,
                 time: 0,
             },
         );
+        pointer.frame(self);
     }
 
-    fn new_popup(&mut self, _surface: PopupSurface, _positioner: PositionerState) {}
-    fn grab(&mut self, _surface: PopupSurface, _seat: wl_seat::WlSeat, _serial: Serial) {}
+    fn new_popup(&mut self, surface: PopupSurface, positioner: PositionerState) {
+        if let Err(err) = self
+            .popup_manager
+            .track_popup(PopupKind::Xdg(surface.clone()))
+        {
+            tracing::warn!("track_popup: {:?}", err);
+        }
+        self.configure_popup(&surface, positioner);
+    }
+
+    fn grab(&mut self, surface: PopupSurface, _seat: wl_seat::WlSeat, serial: Serial) {
+        let Some(toplevel) = self.primary_toplevel.clone() else {
+            tracing::warn!("popup grab sem toplevel");
+            return;
+        };
+
+        let pointer = self.pointer.clone();
+
+        let root = toplevel.wl_surface().clone();
+        let popup = PopupKind::Xdg(surface.clone());
+        let popup_grab = match self.popup_manager.grab_popup(root, popup, &self.seat, serial) {
+            Ok(grab) => {
+                tracing::info!("popup grab ok (serial={serial:?})");
+                grab
+            }
+            Err(err) => {
+                tracing::warn!("grab_popup falhou: {:?}", err);
+                return;
+            }
+        };
+
+        // Grab de ponteiro (sem mudar foco do teclado — evita piscar o Konsole).
+        let pointer_grab = PopupPointerGrab::new(&popup_grab);
+        pointer.set_grab(self, pointer_grab, serial, Focus::Keep);
+
+        self.active_popup = Some(surface.clone());
+        let wl_surface = surface.wl_surface().clone();
+        let origin = self.surface_origin_for(&wl_surface);
+        let motion_serial = self.next_serial();
+        pointer.motion(
+            self,
+            Some((wl_surface, origin)),
+            &MotionEvent {
+                location: self.pointer_pos,
+                serial: motion_serial,
+                time: 0,
+            },
+        );
+        pointer.frame(self);
+    }
+
     fn reposition_request(
         &mut self,
-        _surface: PopupSurface,
-        _positioner: PositionerState,
-        _token: u32,
+        surface: PopupSurface,
+        positioner: PositionerState,
+        token: u32,
     ) {
+        let parent_rect = self.parent_constraint_rect(&surface);
+        let geometry = positioner.get_unconstrained_geometry(parent_rect);
+        let compositor_xy = parent_rect.loc + geometry.loc;
+        self.popup_render_offsets
+            .insert(surface.wl_surface().id(), (compositor_xy.x, compositor_xy.y));
+        surface.with_pending_state(|state| {
+            state.geometry = geometry;
+        });
+        let _ = surface.send_repositioned(token);
+        let _ = surface.send_configure();
     }
 
     fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
@@ -178,10 +451,34 @@ impl XdgShellHandler for State {
             request_exit(&self.exit_requested);
         }
     }
+
+    fn popup_destroyed(&mut self, surface: PopupSurface) {
+        tracing::info!("popup destruído");
+        self.popup_render_offsets.remove(&surface.wl_surface().id());
+        let was_active = self
+            .active_popup
+            .as_ref()
+            .is_some_and(|p| p.wl_surface() == surface.wl_surface());
+        if was_active {
+            self.active_popup = None;
+            if self.pointer.is_grabbed() {
+                let pointer = self.pointer.clone();
+                let serial = self.next_serial();
+                pointer.unset_grab(self, serial, 0);
+            }
+            self.restore_pointer_to_toplevel();
+        }
+    }
 }
 
 impl SelectionHandler for State {
     type SelectionUserData = ();
+}
+
+impl PrimarySelectionHandler for State {
+    fn primary_selection_state(&self) -> &PrimarySelectionState {
+        &self.primary_selection_state
+    }
 }
 
 impl DataDeviceHandler for State {
@@ -205,7 +502,12 @@ impl CompositorHandler for State {
     }
 
     fn commit(&mut self, surface: &WlSurface) {
+        let is_popup = smithay::wayland::compositor::get_role(surface) == Some(XDG_POPUP_ROLE);
+        if is_popup {
+            Self::log_popup_tree(surface);
+        }
         smithay::backend::renderer::utils::on_commit_buffer_handler::<Self>(surface);
+        self.popup_manager.commit(surface);
     }
 }
 
@@ -226,7 +528,12 @@ impl SeatHandler for State {
         &mut self.seat_state
     }
 
-    fn focus_changed(&mut self, _seat: &Seat<Self>, _focused: Option<&WlSurface>) {}
+    fn focus_changed(&mut self, seat: &Seat<Self>, focused: Option<&WlSurface>) {
+        let client = focused.and_then(|s| s.client());
+        set_data_device_focus(&self.display_handle, seat, client.clone());
+        set_primary_focus(&self.display_handle, seat, client);
+    }
+
     fn cursor_image(
         &mut self,
         _seat: &Seat<Self>,
@@ -237,9 +544,11 @@ impl SeatHandler for State {
 
 delegate_xdg_shell!(State);
 delegate_compositor!(State);
+delegate_dmabuf!(State);
 delegate_shm!(State);
 delegate_seat!(State);
 delegate_data_device!(State);
+delegate_primary_selection!(State);
 delegate_output!(State);
 
 #[derive(Default)]
@@ -295,19 +604,29 @@ pub fn init_state(
 
     let keyboard = seat.add_keyboard(Default::default(), 200, 200)?;
     let pointer = seat.add_pointer();
+    let logical_size = physical_size.to_logical(1);
 
     Ok(State {
         compositor_state,
         xdg_shell_state: XdgShellState::new::<State>(dh),
         shm_state,
+        dmabuf_state: DmabufState::new(),
+        _dmabuf_global: None,
         _output_state: output_state,
         seat_state,
+        seat,
         data_device_state: DataDeviceState::new::<State>(dh),
+        primary_selection_state: PrimarySelectionState::new::<State>(dh),
+        display_handle: dh.clone(),
         output,
         keyboard,
         pointer,
         primary_toplevel: None,
-        output_size: physical_size.to_logical(1),
+        active_popup: None,
+        popup_manager: PopupManager::default(),
+        popup_render_offsets: HashMap::new(),
+        pointer_pos: Point::from((logical_size.w as f64 / 2.0, logical_size.h as f64 / 2.0)),
+        output_size: logical_size,
         exit_requested,
         serial: 0,
     })
@@ -318,12 +637,23 @@ pub fn accept_clients(
     state: &mut State,
     listener: &ListeningSocket,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    accept_clients_rounds(display, state, listener, 2)
+}
+
+pub fn accept_clients_rounds(
+    display: &mut Display<State>,
+    state: &mut State,
+    listener: &ListeningSocket,
+    rounds: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(stream) = listener.accept()? {
         display
             .handle()
             .insert_client(stream, Arc::new(ClientState::default()))?;
     }
-    display.dispatch_clients(state)?;
-    display.flush_clients()?;
+    for _ in 0..rounds {
+        display.dispatch_clients(state)?;
+        display.flush_clients()?;
+    }
     Ok(())
 }

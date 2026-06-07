@@ -34,12 +34,9 @@ pub fn detect_terminal(on_tty: bool) -> String {
         return term;
     }
 
-    let candidates: &[&str] = if on_tty {
-        // Konsole precisa do Plasma — inútil num VT cru
-        &["alacritty", "foot", "kitty", "wezterm", "ghostty"]
-    } else {
-        &["alacritty", "konsole", "foot", "kitty", "wezterm", "ghostty"]
-    };
+    // Konsole primeiro: menu de contexto (botão direito) para testes no kiosk.
+    let _ = on_tty;
+    let candidates = &["konsole", "alacritty", "foot", "kitty", "wezterm", "ghostty"];
 
     for candidate in candidates {
         if command_exists(candidate) {
@@ -47,11 +44,7 @@ pub fn detect_terminal(on_tty: bool) -> String {
         }
     }
 
-    if on_tty {
-        "alacritty".to_string()
-    } else {
-        "konsole".to_string()
-    }
+    "konsole".to_string()
 }
 
 pub fn resolve_terminal(requested: &str) -> String {
@@ -81,6 +74,9 @@ pub fn spawn_terminal(command: &str, wayland_display: &str) {
         "konsole" => {
             let mut c = Command::new("konsole");
             c.arg("--separate");
+            // Menus Qt em compositor aninhado/TTY: evita falha de EGL no popup.
+            c.env("QSG_RHI_BACKEND", "software");
+            c.env("QT_QUICK_BACKEND", "software");
             c
         }
         "alacritty" => Command::new("alacritty"),

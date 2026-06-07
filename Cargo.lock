@@ -892,6 +892,7 @@ dependencies = [
  "wayland-server",
  "winit",
  "xcursor",
+ "xkbcommon",
 ]
 
 [[package]]

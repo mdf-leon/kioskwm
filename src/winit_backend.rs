@@ -2,15 +2,7 @@ use std::time::{Duration, Instant};
 
 use smithay::{
     backend::{
-        renderer::{
-            element::{
-                surface::{render_elements_from_surface_tree, WaylandSurfaceRenderElement},
-                Kind,
-            },
-            gles::GlesRenderer,
-            utils::draw_render_elements,
-            Color32F, Frame, Renderer,
-        },
+        renderer::{gles::GlesRenderer, ImportDma},
         winit::{self, WinitEvent},
     },
     reexports::wayland_server::Display,
@@ -19,10 +11,10 @@ use smithay::{
 use wayland_server::ListeningSocket;
 
 use crate::{
-    input::{handle_input, PointerTracker},
-    render::send_frames_surface_tree,
+    input::{debug_right_click, handle_input, PointerTracker},
+    render::{render_kiosk_frame, send_frame_callbacks},
     spawn::{command_exists, resolve_terminal, schedule_spawn},
-    state::{accept_clients, init_state, new_exit_flag, should_exit, State},
+    state::{accept_clients, accept_clients_rounds, init_state, new_exit_flag, should_exit, State},
 };
 use crate::Args;
 
@@ -53,6 +45,7 @@ pub fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         (480, 270),
         new_exit_flag(),
     )?;
+    state.register_dmabuf_formats(backend.renderer().dmabuf_formats());
 
     let listener = ListeningSocket::bind_auto("kioskwm", 0..32)?;
     let socket_name = listener
@@ -81,6 +74,9 @@ pub fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
 
     let start_time = Instant::now();
     let mut pointer_tracker = PointerTracker::new(state.output_size);
+    let auto_rclick = std::env::var_os("KIOSKWM_DEBUG_RCLICK").is_some();
+    let mut auto_rclick_done = false;
+    let mut frame_count: u64 = 0;
 
     loop {
         let status = winit.dispatch_new_events(|event| match event {
@@ -102,36 +98,37 @@ pub fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         let damage = Rectangle::from_size(size);
 
         {
-            let (renderer, mut framebuffer) = backend.bind()?;
-            let elements = state
-                .xdg_shell_state
-                .toplevel_surfaces()
-                .iter()
-                .flat_map(|surface| {
-                    render_elements_from_surface_tree(
-                        renderer,
-                        surface.wl_surface(),
-                        (0, 0),
-                        1.0,
-                        1.0,
-                        Kind::Unspecified,
-                    )
-                })
-                .collect::<Vec<WaylandSurfaceRenderElement<GlesRenderer>>>();
-
-            let mut frame = renderer.render(&mut framebuffer, size, Transform::Flipped180)?;
-            frame.clear(Color32F::new(0.08, 0.08, 0.08, 1.0), &[damage])?;
-            draw_render_elements(&mut frame, 1.0, &elements, &[damage])?;
-            let _ = frame.finish()?;
-
-            for surface in state.xdg_shell_state.toplevel_surfaces() {
-                send_frames_surface_tree(
-                    surface.wl_surface(),
-                    start_time.elapsed().as_millis() as u32,
-                );
-            }
-
             accept_clients(&mut display, &mut state, &listener)?;
+
+            let (renderer, mut framebuffer) = backend.bind()?;
+            render_kiosk_frame(
+                renderer,
+                &mut framebuffer,
+                &state,
+                size,
+                Transform::Flipped180,
+                Some(pointer_tracker.pos),
+                None,
+            )?;
+
+            send_frame_callbacks(
+                &mut state,
+                start_time.elapsed().as_millis() as u32,
+            );
+
+            // O buffer do menu chega após o frame callback — drena a resposta do cliente.
+            let rounds = if state.active_popup.is_some() { 10 } else { 2 };
+            accept_clients_rounds(&mut display, &mut state, &listener, rounds)?;
+        }
+
+        frame_count += 1;
+        if auto_rclick
+            && !auto_rclick_done
+            && state.primary_toplevel.is_some()
+            && frame_count > 120
+        {
+            debug_right_click(&mut state, &mut pointer_tracker);
+            auto_rclick_done = true;
         }
 
         backend.submit(Some(&[damage]))?;

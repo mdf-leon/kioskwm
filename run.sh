@@ -6,5 +6,6 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 export RUST_LOG="${RUST_LOG:-kioskwm=info}"
+export KIOSKWM_LOG="${KIOSKWM_LOG:-/tmp/kioskwm.log}"
 
 exec cargo run --release -- "$@"

@@ -8,6 +8,7 @@ mod tty;
 mod winit_backend;
 
 use clap::Parser;
+use tracing_subscriber::fmt::writer::MakeWriterExt;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about = "Kiosk WM — compositor Wayland para kiosk ou teste no desktop")]
@@ -33,7 +34,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::var_os("RUST_LOG").is_none() {
         std::env::set_var("RUST_LOG", "kioskwm=info");
     }
-    tracing_subscriber::fmt().init();
+
+    let log_path = std::env::var_os("KIOSKWM_LOG").unwrap_or_else(|| "/tmp/kioskwm.log".into());
+    let log_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)?;
+    eprintln!("kioskwm: log em {}", log_path.to_string_lossy());
+    tracing_subscriber::fmt()
+        .with_writer(std::io::stderr.and(log_file))
+        .init();
 
     let args = Args::parse();
 
