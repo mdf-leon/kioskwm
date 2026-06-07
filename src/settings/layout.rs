@@ -20,6 +20,7 @@ pub enum ConfirmAction {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Hit {
     None,
+    Close,
     AppletMouse,
     FooterQuit,
     FooterShutdown,
@@ -44,29 +45,29 @@ impl Rect {
     }
 }
 
-/// Botao estilo KDE Quick Settings (linha com icone + texto).
+/// Linha estilo KDE Quick Settings — icone Breeze + texto.
 pub const APPLET_MOUSE: Rect = Rect {
-    x: 24,
-    y: 128,
-    w: 452,
-    h: 48,
+    x: 20,
+    y: 78,
+    w: 200,
+    h: 36,
 };
 
 pub fn footer_buttons() -> [Rect; 3] {
-    let y = PANEL_H - theme::FOOTER_H + 12;
-    let h = 36;
-    let gap = 8;
-    let w = (PANEL_W - 48 - gap * 2) / 3;
+    let y = PANEL_H - theme::FOOTER_H + 8;
+    let h = 32;
+    let gap = 10;
+    let w = (PANEL_W - 40 - gap * 2) / 3;
     [
-        Rect { x: 24, y, w, h },
+        Rect { x: 20, y, w, h },
         Rect {
-            x: 24 + w + gap,
+            x: 20 + w + gap,
             y,
             w,
             h,
         },
         Rect {
-            x: 24 + (w + gap) * 2,
+            x: 20 + (w + gap) * 2,
             y,
             w,
             h,
@@ -74,44 +75,51 @@ pub fn footer_buttons() -> [Rect; 3] {
     ]
 }
 
+pub const HEADER_CLOSE: Rect = Rect {
+    x: PANEL_W - 40,
+    y: 8,
+    w: 32,
+    h: 32,
+};
+
 pub const MOUSE_BACK: Rect = Rect {
-    x: 16,
-    y: 62,
-    w: 108,
+    x: 12,
+    y: 8,
+    w: 96,
     h: 32,
 };
 
 pub fn mouse_slider() -> Rect {
     Rect {
-        x: 48,
-        y: 220,
-        w: PANEL_W - 96,
-        h: 6,
+        x: 32,
+        y: 188,
+        w: PANEL_W - 64,
+        h: 4,
     }
 }
 
 pub fn confirm_modal() -> Rect {
     Rect {
-        x: 60,
-        y: 150,
-        w: 380,
-        h: 200,
+        x: 50,
+        y: 140,
+        w: 340,
+        h: 180,
     }
 }
 
 pub fn confirm_buttons(modal: Rect) -> (Rect, Rect) {
-    let bw = 140;
-    let bh = 36;
-    let y = modal.y + modal.h - bh - 20;
+    let bw = 128;
+    let bh = 32;
+    let y = modal.y + modal.h - bh - 18;
     (
         Rect {
-            x: modal.x + 20,
+            x: modal.x + 18,
             y,
             w: bw,
             h: bh,
         },
         Rect {
-            x: modal.x + modal.w - bw - 20,
+            x: modal.x + modal.w - bw - 18,
             y,
             w: bw,
             h: bh,
@@ -130,6 +138,10 @@ pub fn hit_test(screen: Screen, confirm: Option<ConfirmAction>, x: i32, y: i32) 
             return Hit::ConfirmOk;
         }
         return Hit::None;
+    }
+
+    if HEADER_CLOSE.contains(x, y) {
+        return Hit::Close;
     }
 
     match screen {
@@ -155,9 +167,9 @@ pub fn hit_test(screen: Screen, confirm: Option<ConfirmAction>, x: i32, y: i32) 
             let track = mouse_slider();
             let hit = Rect {
                 x: track.x - 12,
-                y: track.y - 24,
+                y: track.y - 28,
                 w: track.w + 24,
-                h: track.h + 48,
+                h: track.h + 56,
             };
             if hit.contains(x, y) {
                 return Hit::Slider;

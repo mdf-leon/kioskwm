@@ -7,7 +7,6 @@ use smithay::{
                 Kind,
             },
             gles::{GlesFrame, GlesRenderer},
-            Color32F,
         },
     },
     utils::{Point, Rectangle, Size, Transform},
@@ -16,10 +15,12 @@ use smithay::{
 use crate::state::State;
 
 use super::{
-    layout::{self, ConfirmAction, Screen},
+    icon,
+    layout::{self, ConfirmAction, Hit, Screen},
     raster::Canvas,
     slider::{format_speed, t_from_speed},
-    theme,
+    text,
+    theme::{self, Rgba},
 };
 
 pub struct PanelElement {
@@ -62,44 +63,13 @@ pub fn prepare_panel(
     Ok(Some(PanelElement { elem }))
 }
 
-/// Knob do slider — GPU barato, atualiza a cada frame sem rerasterizar o painel.
 pub fn draw_overlay_extras(
-    frame: &mut GlesFrame<'_, '_>,
-    state: &State,
-    output: Size<i32, smithay::utils::Physical>,
-    scale: f64,
+    _frame: &mut GlesFrame<'_, '_>,
+    _state: &State,
+    _output: Size<i32, smithay::utils::Physical>,
+    _scale: f64,
 ) {
-    if !state.overlay_open
-        || state.settings.screen != Screen::Mouse
-        || state.settings.confirm.is_some()
-    {
-        return;
-    }
-
-    let pw = (theme::PANEL_W as f64 * scale).round() as i32;
-    let ph = (theme::PANEL_H as f64 * scale).round() as i32;
-    let px = (output.w - pw) / 2;
-    let py = (output.h - ph) / 2;
-
-    let track = layout::mouse_slider();
-    let t = t_from_speed(state.pointer_speed);
-    let kx = px + ((track.x as f64 + track.w as f64 * t) * scale).round() as i32;
-    let ky = py + ((track.y as f64 - 5.0) * scale).round() as i32;
-    let ks = (16.0 * scale).round() as i32;
-
-    let border = Color32F::new(0.24, 0.68, 0.91, 1.0);
-    let fill = Color32F::new(0.16, 0.17, 0.19, 1.0);
-    draw_phys_rect(frame, kx - ks / 2, ky, ks, ks, border);
-    draw_phys_rect(frame, kx - ks / 2 + 2, ky + 2, ks - 4, ks - 4, fill);
-}
-
-fn draw_phys_rect(frame: &mut GlesFrame<'_, '_>, x: i32, y: i32, w: i32, h: i32, color: Color32F) {
-    if w <= 0 || h <= 0 {
-        return;
-    }
-    let dest = Rectangle::new(Point::from((x, y)), Size::from((w, h)));
-    let damage = Rectangle::from_size(dest.size);
-    let _ = frame.draw_solid(dest, &[damage], color);
+    // Knob do slider vai no canvas (winit usa Transform::Flipped180 e quebrava o draw_solid).
 }
 
 fn rebuild_cache_if_needed(state: &mut State) -> Result<(), Box<dyn std::error::Error>> {
@@ -112,20 +82,34 @@ fn rebuild_cache_if_needed(state: &mut State) -> Result<(), Box<dyn std::error::
     }
 
     let mut canvas = Canvas::new(theme::PANEL_W, theme::PANEL_H);
-    canvas.fill(theme::WINDOW_BG);
-    canvas.fill_rect(0, 0, theme::PANEL_W, 3, theme::ACCENT);
+    paint_chrome(&mut canvas);
+
+    let hover = state.settings.hover;
 
     match state.settings.screen {
-        Screen::Main => paint_main(&mut canvas),
-        Screen::Mouse => paint_mouse_static(&mut canvas, state.pointer_speed),
+        Screen::Main => paint_main(&mut canvas, hover),
+        Screen::Mouse => paint_mouse_static(&mut canvas, state.pointer_speed, hover),
     }
 
     if let Some(confirm) = state.settings.confirm {
-        paint_confirm(&mut canvas, confirm);
+        paint_confirm(&mut canvas, confirm, hover);
     }
 
     upload_pixels(state, &canvas, key);
     Ok(())
+}
+
+fn paint_chrome(c: &mut Canvas) {
+    c.fill(theme::WINDOW_BG);
+    c.bordered_rounded_rect(
+        0,
+        0,
+        theme::PANEL_W,
+        theme::PANEL_H,
+        theme::PANEL_RADIUS,
+        theme::WINDOW_BG,
+        theme::BORDER,
+    );
 }
 
 fn upload_pixels(state: &mut State, canvas: &Canvas, key: u64) {
@@ -163,7 +147,6 @@ fn upload_pixels(state: &mut State, canvas: &Canvas, key: u64) {
     *guard = Some(crate::state::SettingsPanelCache { buffer, key });
 }
 
-/// Velocidade fora da chave — knob/texto extras; cache so muda tela/confirm.
 fn cache_key(state: &State) -> u64 {
     let screen = state.settings.screen as u8 as u64;
     let confirm = match state.settings.confirm {
@@ -177,93 +160,169 @@ fn cache_key(state: &State) -> u64 {
     } else {
         0
     };
-    screen | (confirm << 4) | (speed_q << 8)
+    let hover_id = state.settings.hover.map(hit_cache_id).unwrap_or(0);
+    screen | (confirm << 4) | (speed_q << 8) | (hover_id << 12)
 }
 
-fn paint_main(c: &mut Canvas) {
-    c.draw_hamburger(20, 18, theme::TEXT);
-    c.text(52, 16, "Ajustes rapidos", theme::TEXT, 2);
-    c.hline(0, theme::HEADER_H - 1, theme::PANEL_W, theme::BORDER);
-
-    c.text(24, 88, "Paginas mais usadas", theme::TEXT_INACTIVE, 1);
-
-    let row = layout::APPLET_MOUSE;
-    c.bordered_rounded_rect(row.x, row.y, row.w, row.h, 6, theme::BUTTON_BG, theme::BORDER);
-    c.draw_breeze_mouse_icon(row.x + 14, row.y + 12);
-    c.text(row.x + 48, row.y + 16, "Mouse", theme::TEXT, 2);
-
-    let footer_y = theme::PANEL_H - theme::FOOTER_H;
-    c.fill_rect(0, footer_y, theme::PANEL_W, 1, theme::BORDER);
-    c.fill_rect(0, footer_y + 1, theme::PANEL_W, theme::FOOTER_H - 1, theme::HEADER_BG);
-    c.text(24, footer_y + 10, "Sistema", theme::TEXT_INACTIVE, 1);
-
-    let footers = layout::footer_buttons();
-    let labels = ["Fechar WM", "Desligar", "Reiniciar"];
-    for (i, rect) in footers.iter().enumerate() {
-        let border = if i == 0 {
-            theme::BORDER
-        } else {
-            theme::NEGATIVE
-        };
-        c.bordered_rounded_rect(rect.x, rect.y, rect.w, rect.h, 6, theme::BUTTON_BG, border);
-        let tw = Canvas::text_width(labels[i], 1);
-        let tc = if i == 0 { theme::TEXT } else { theme::NEGATIVE };
-        c.text(rect.x + (rect.w - tw) / 2, rect.y + 12, labels[i], tc, 1);
+fn hit_cache_id(hit: Hit) -> u64 {
+    match hit {
+        Hit::None => 0,
+        Hit::Close => 1,
+        Hit::AppletMouse => 2,
+        Hit::FooterQuit => 3,
+        Hit::FooterShutdown => 4,
+        Hit::FooterReboot => 5,
+        Hit::MouseBack => 6,
+        Hit::Slider => 7,
+        Hit::ConfirmCancel => 8,
+        Hit::ConfirmOk => 9,
     }
 }
 
-fn paint_mouse_static(c: &mut Canvas, speed: f64) {
-    c.text(24, 16, "Mouse", theme::TEXT, 2);
+fn paint_close(c: &mut Canvas, hover: Option<Hit>) {
+    let r = layout::HEADER_CLOSE;
+    if hover == Some(Hit::Close) {
+        c.fill_rounded_rect(r.x, r.y, r.w, r.h, 6, theme::CLOSE_HOVER);
+    }
+    c.draw_close(r.x + 9, r.y + 10, theme::TEXT_INACTIVE);
+}
+
+fn paint_header(c: &mut Canvas, title: &str, hover: Option<Hit>) {
+    c.draw_hamburger(16, 16, theme::TEXT);
+    text::draw_bold(c, 44, 10, 17.0, title, theme::TEXT);
+    paint_close(c, hover);
     c.hline(0, theme::HEADER_H - 1, theme::PANEL_W, theme::BORDER);
+}
 
+fn paint_sub_header(c: &mut Canvas, title: &str, hover: Option<Hit>) {
     let back = layout::MOUSE_BACK;
-    c.bordered_rounded_rect(back.x, back.y, back.w, back.h, 6, theme::BUTTON_BG, theme::BORDER);
-    c.text(back.x + 12, back.y + 10, "< Voltar", theme::ACCENT, 1);
+    if hover == Some(Hit::MouseBack) {
+        c.fill_rounded_rect(back.x, back.y, back.w, back.h, 6, theme::BUTTON_HOVER);
+    }
+    icon::draw_back(c, 16, 15, 18);
+    text::draw(c, 38, 14, 12.0, "Voltar", theme::ACCENT);
+    let tw = text::width(title, 17.0, true);
+    text::draw_bold(c, (theme::PANEL_W - tw) / 2, 10, 17.0, title, theme::TEXT);
+    paint_close(c, hover);
+    c.hline(0, theme::HEADER_H - 1, theme::PANEL_W, theme::BORDER);
+}
 
-    c.text(48, 108, "Velocidade do ponteiro", theme::TEXT, 2);
-    c.text(
-        48,
-        134,
-        "Centro = 1x   Esquerda = 0.01x   Direita = 4x",
-        theme::TEXT_INACTIVE,
-        1,
-    );
+fn paint_main(c: &mut Canvas, hover: Option<Hit>) {
+    paint_header(c, "Ajustes rapidos", hover);
+
+    text::draw(c, 20, theme::HEADER_H + 10, 11.0, "Paginas mais usadas", theme::TEXT_INACTIVE);
+
+    let tile = layout::APPLET_MOUSE;
+    let tile_bg = if hover == Some(Hit::AppletMouse) {
+        theme::TILE_HOVER
+    } else {
+        theme::TILE_BG
+    };
+    c.bordered_rounded_rect(tile.x, tile.y, tile.w, tile.h, 6, tile_bg, theme::BORDER);
+    icon::draw_mouse(c, tile.x + 10, tile.y + 7, 22);
+    text::draw(c, tile.x + 40, tile.y + 9, 13.0, "Mouse", theme::TEXT);
+
+    let footer_y = theme::PANEL_H - theme::FOOTER_H;
+    c.hline(0, footer_y, theme::PANEL_W, theme::BORDER);
+
+    let footers = layout::footer_buttons();
+    let labels = ["Fechar WM", "Desligar", "Reiniciar"];
+    let hits = [Hit::FooterQuit, Hit::FooterShutdown, Hit::FooterReboot];
+    for (i, rect) in footers.iter().enumerate() {
+        let destructive = i > 0;
+        let (fill, border) = footer_button_style(hover, hits[i], destructive);
+        c.bordered_rounded_rect(rect.x, rect.y, rect.w, rect.h, 4, fill, border);
+        let tw = text::width(labels[i], 11.5, false);
+        let tc = if destructive { theme::NEGATIVE } else { theme::TEXT };
+        text::draw(
+            c,
+            rect.x + (rect.w - tw) / 2,
+            rect.y + 7,
+            11.5,
+            labels[i],
+            tc,
+        );
+    }
+}
+
+fn footer_button_style(hover: Option<Hit>, hit: Hit, destructive: bool) -> (Rgba, Rgba) {
+    let hovered = hover == Some(hit);
+    if destructive {
+        (
+            if hovered { theme::NEGATIVE_HOVER } else { theme::BUTTON_BG },
+            theme::NEGATIVE,
+        )
+    } else {
+        (
+            if hovered { theme::BUTTON_HOVER } else { theme::BUTTON_BG },
+            theme::BORDER,
+        )
+    }
+}
+
+fn paint_mouse_static(c: &mut Canvas, speed: f64, hover: Option<Hit>) {
+    paint_sub_header(c, "Mouse", hover);
+
+    text::draw(c, 32, 72, 13.0, "Velocidade do ponteiro", theme::TEXT);
 
     let track = layout::mouse_slider();
-    c.fill_rounded_rect(track.x, track.y, track.w, track.h, 3, theme::SLIDER_TRACK);
+    c.fill_rounded_rect(track.x, track.y, track.w, track.h, 2, theme::SLIDER_TRACK);
     let mid = track.x + track.w / 2;
-    c.fill_rect(mid, track.y - 6, 1, track.h + 12, theme::SLIDER_TICK);
+    c.fill_rect(mid, track.y - 5, 1, track.h + 10, theme::SLIDER_TICK);
 
-    c.text(track.x, track.y + 16, layout::SLIDER_LABEL_LEFT, theme::TEXT_INACTIVE, 1);
-    let cw = Canvas::text_width(layout::SLIDER_LABEL_CENTER, 1);
-    c.text(mid - cw / 2, track.y + 16, layout::SLIDER_LABEL_CENTER, theme::TEXT_INACTIVE, 1);
-    let rw = Canvas::text_width(layout::SLIDER_LABEL_RIGHT, 1);
-    c.text(track.x + track.w - rw, track.y + 16, layout::SLIDER_LABEL_RIGHT, theme::TEXT_INACTIVE, 1);
+    let t = t_from_speed(speed);
+    let kx = track.x + (track.w as f64 * t).round() as i32;
+    let ky = track.y + track.h / 2;
+    c.fill_circle(kx, ky, 9, theme::KNOB_FILL, theme::ACCENT);
+
+    text::draw(
+        c,
+        track.x,
+        track.y + 16,
+        10.0,
+        layout::SLIDER_LABEL_LEFT,
+        theme::TEXT_INACTIVE,
+    );
+    let cw = text::width(layout::SLIDER_LABEL_CENTER, 10.0, false);
+    text::draw(
+        c,
+        mid - cw / 2,
+        track.y + 16,
+        10.0,
+        layout::SLIDER_LABEL_CENTER,
+        theme::TEXT_INACTIVE,
+    );
+    let rw = text::width(layout::SLIDER_LABEL_RIGHT, 10.0, false);
+    text::draw(
+        c,
+        track.x + track.w - rw,
+        track.y + 16,
+        10.0,
+        layout::SLIDER_LABEL_RIGHT,
+        theme::TEXT_INACTIVE,
+    );
 
     let val = format_speed(speed);
-    let vw = Canvas::text_width(&val, 2);
-    c.text((theme::PANEL_W - vw) / 2, 188, &val, theme::ACCENT, 2);
+    let vw = text::width(&val, 20.0, true);
+    text::draw_bold(c, (theme::PANEL_W - vw) / 2, 228, 20.0, &val, theme::ACCENT);
 
     let footer_y = theme::PANEL_H - theme::MOUSE_FOOTER_H;
-    c.fill_rect(0, footer_y, theme::PANEL_W, 1, theme::BORDER);
-    c.fill_rect(0, footer_y + 1, theme::PANEL_W, theme::MOUSE_FOOTER_H - 1, theme::VIEW_BG);
-    c.text(24, footer_y + 14, "Arraste o controle ou use +/- e setas.", theme::TEXT_INACTIVE, 1);
-    c.text(24, footer_y + 32, "Esc ou Voltar: menu principal.", theme::TEXT_INACTIVE, 1);
-    c.text(
-        24,
-        footer_y + 50,
-        "Ctrl+Alt+Del / Ctrl+Shift+Esc / Super+Esc: fechar ajustes.",
+    c.hline(0, footer_y, theme::PANEL_W, theme::BORDER);
+    text::draw(
+        c,
+        20,
+        footer_y + 12,
+        10.0,
+        "Arraste o controle. Esc ou Voltar: menu principal.",
         theme::TEXT_INACTIVE,
-        1,
     );
 }
 
-fn paint_confirm(c: &mut Canvas, action: ConfirmAction) {
+fn paint_confirm(c: &mut Canvas, action: ConfirmAction, hover: Option<Hit>) {
     c.fill_rect(0, 0, theme::PANEL_W, theme::PANEL_H, theme::MODAL_SCRIM);
 
     let modal = layout::confirm_modal();
-    c.bordered_rounded_rect(modal.x, modal.y, modal.w, modal.h, 8, theme::MODAL_BG, theme::BORDER);
-    c.fill_rect(modal.x, modal.y, modal.w, 3, theme::ACCENT);
+    c.bordered_rounded_rect(modal.x, modal.y, modal.w, modal.h, 6, theme::MODAL_BG, theme::BORDER);
 
     let (title, body) = match action {
         ConfirmAction::QuitWm => ("Fechar kioskwm?", "O compositor Wayland sera encerrado."),
@@ -271,14 +330,16 @@ fn paint_confirm(c: &mut Canvas, action: ConfirmAction) {
         ConfirmAction::Reboot => ("Reiniciar o computador?", "Todos os programas serao fechados."),
     };
 
-    c.text(modal.x + 24, modal.y + 24, title, theme::TEXT, 2);
-    c.text(modal.x + 24, modal.y + 56, body, theme::TEXT_INACTIVE, 1);
+    text::draw_bold(c, modal.x + 20, modal.y + 24, 15.0, title, theme::TEXT);
+    text::draw(c, modal.x + 20, modal.y + 52, 11.5, body, theme::TEXT_INACTIVE);
 
     let (cancel, ok) = layout::confirm_buttons(modal);
-    c.bordered_rounded_rect(cancel.x, cancel.y, cancel.w, cancel.h, 6, theme::BUTTON_BG, theme::BORDER);
-    c.text(cancel.x + 28, cancel.y + 12, "Cancelar", theme::TEXT, 1);
-    c.bordered_rounded_rect(ok.x, ok.y, ok.w, ok.h, 6, theme::NEGATIVE, theme::NEGATIVE);
-    c.text(ok.x + 22, ok.y + 12, "Confirmar", theme::TEXT, 1);
+    let (cfill, cborder) = footer_button_style(hover, Hit::ConfirmCancel, false);
+    c.bordered_rounded_rect(cancel.x, cancel.y, cancel.w, cancel.h, 4, cfill, cborder);
+    text::draw(c, cancel.x + 22, cancel.y + 7, 11.5, "Cancelar", theme::TEXT);
+    let (ofill, oborder) = footer_button_style(hover, Hit::ConfirmOk, true);
+    c.bordered_rounded_rect(ok.x, ok.y, ok.w, ok.h, 4, ofill, oborder);
+    text::draw(c, ok.x + 16, ok.y + 7, 11.5, "Confirmar", theme::TEXT);
 }
 
 pub fn invalidate_cache(state: &mut State) {

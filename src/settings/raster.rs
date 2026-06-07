@@ -1,5 +1,3 @@
-use crate::font8x8::glyph;
-
 use super::theme::Rgba;
 
 pub struct Canvas {
@@ -69,7 +67,6 @@ impl Canvas {
         }
     }
 
-    /// Borda fina estilo Breeze (preenchimento + recorte interno).
     pub fn bordered_rounded_rect(
         &mut self,
         x: i32,
@@ -88,50 +85,29 @@ impl Canvas {
         self.fill_rect(x, y, w, 1, c);
     }
 
-    pub fn text(&mut self, x: i32, y: i32, s: &str, c: Rgba, scale: i32) {
-        let mut cx = x;
-        for ch in s.chars() {
-            let bmp = glyph(ch);
-            for (row, bits) in bmp.iter().enumerate() {
-                for col in 0..8 {
-                    if bits & (1 << col) != 0 {
-                        for sy in 0..scale {
-                            for sx in 0..scale {
-                                self.put(
-                                    cx + col * scale + sx,
-                                    y + row as i32 * scale + sy,
-                                    c,
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-            cx += 8 * scale + scale / 2;
-        }
-    }
-
-    pub fn text_width(s: &str, scale: i32) -> i32 {
-        if s.is_empty() {
-            return 0;
-        }
-        s.chars().count() as i32 * (8 * scale + scale / 2) - scale / 2
-    }
-
     pub fn draw_hamburger(&mut self, x: i32, y: i32, c: Rgba) {
         for i in 0..3 {
-            self.fill_rounded_rect(x, y + i * 7, 20, 3, 1, c);
+            self.fill_rounded_rect(x, y + i * 6, 18, 2, 1, c);
         }
     }
 
-    /// Icone mouse estilo Breeze (silhueta clara).
-    pub fn draw_breeze_mouse_icon(&mut self, x: i32, y: i32) {
-        let body = Rgba::new(161, 169, 177, 255);
-        let hi = Rgba::new(220, 224, 228, 255);
-        self.fill_rounded_rect(x + 6, y + 2, 14, 22, 6, body);
-        self.fill_rounded_rect(x + 9, y + 5, 3, 8, 1, hi);
-        self.fill_rounded_rect(x + 14, y + 5, 3, 8, 1, hi);
-        self.fill_rect(x + 11, y + 2, 2, 4, hi);
-        self.fill_rounded_rect(x + 9, y + 24, 8, 6, 2, body);
+    pub fn draw_close(&mut self, x: i32, y: i32, c: Rgba) {
+        for i in 0..12 {
+            self.put(x + i, y + i, c);
+            self.put(x + 11 - i, y + i, c);
+        }
+    }
+
+    pub fn fill_circle(&mut self, cx: i32, cy: i32, r: i32, fill: Rgba, border: Rgba) {
+        let r = r.max(1);
+        for dy in -r..=r {
+            for dx in -r..=r {
+                let d2 = dx * dx + dy * dy;
+                if d2 <= r * r {
+                    let c = if d2 >= (r - 1) * (r - 1) { border } else { fill };
+                    self.put(cx + dx, cy + dy, c);
+                }
+            }
+        }
     }
 }

@@ -29,6 +29,10 @@ pub fn handle_pointer_button(state: &mut State, pos: Point<f64, smithay::utils::
 
     match layout::hit_test(state.settings.screen, state.settings.confirm, lx, ly) {
         Hit::None => {}
+        Hit::Close => {
+            state.overlay_open = false;
+            reset_on_open(state);
+        }
         Hit::AppletMouse => {
             state.settings.screen = Screen::Mouse;
             invalidate_cache(state);
@@ -68,21 +72,39 @@ pub fn handle_pointer_button(state: &mut State, pos: Point<f64, smithay::utils::
 }
 
 pub fn handle_pointer_motion(state: &mut State, pos: Point<f64, smithay::utils::Logical>) {
-    if !state.overlay_open || !state.settings.slider_drag || state.settings.confirm.is_some() {
+    if !state.overlay_open {
         return;
     }
-    if state.settings.screen != Screen::Mouse {
-        return;
-    }
-    let Some((lx, _)) = layout::pointer_to_panel_local(
+
+    let hit = layout::pointer_to_panel_local(
         pos.x,
         pos.y,
         state.output_size.w,
         state.output_size.h,
-    ) else {
-        return;
-    };
-    apply_speed(state, layout::slider_value_from_x(lx));
+    )
+    .map(|(lx, ly)| layout::hit_test(state.settings.screen, state.settings.confirm, lx, ly))
+    .unwrap_or(Hit::None);
+
+    let hover = (hit != Hit::None).then_some(hit);
+    if state.settings.hover != hover {
+        state.settings.hover = hover;
+        invalidate_cache(state);
+    }
+
+    if state.settings.slider_drag
+        && state.settings.confirm.is_none()
+        && state.settings.screen == Screen::Mouse
+    {
+        let Some((lx, _)) = layout::pointer_to_panel_local(
+            pos.x,
+            pos.y,
+            state.output_size.w,
+            state.output_size.h,
+        ) else {
+            return;
+        };
+        apply_speed(state, layout::slider_value_from_x(lx));
+    }
 }
 
 pub fn handle_pointer_release(state: &mut State) {
@@ -95,12 +117,8 @@ fn apply_speed(state: &mut State, speed: f64) {
     if (state.pointer_speed - q).abs() < 0.0001 {
         return;
     }
-    let old_q = (state.pointer_speed * 5.0).round();
     state.pointer_speed = q;
-    // Texto do valor: rerasteriza so a cada ~0.2x; knob segue fluido via draw_overlay_extras.
-    if (state.pointer_speed * 5.0).round() != old_q {
-        invalidate_cache(state);
-    }
+    invalidate_cache(state);
 }
 
 pub fn keyboard_filter(
@@ -181,6 +199,7 @@ pub fn reset_on_open(state: &mut State) {
     state.settings.screen = Screen::Main;
     state.settings.confirm = None;
     state.settings.slider_drag = false;
+    state.settings.hover = None;
     if state.pointer_speed < SPEED_MIN || state.pointer_speed > SPEED_MAX {
         state.pointer_speed = slider::SPEED_CENTER;
     }

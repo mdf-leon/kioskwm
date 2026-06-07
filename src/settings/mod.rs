@@ -1,8 +1,10 @@
 mod actions;
+mod icon;
 mod layout;
 mod raster;
 mod render;
 mod slider;
+mod text;
 pub mod theme;
 
 pub mod input;
@@ -15,6 +17,7 @@ pub struct SettingsState {
     pub screen: Screen,
     pub confirm: Option<ConfirmAction>,
     pub slider_drag: bool,
+    pub hover: Option<layout::Hit>,
 }
 
 impl Default for SettingsState {
@@ -23,6 +26,7 @@ impl Default for SettingsState {
             screen: Screen::Main,
             confirm: None,
             slider_drag: false,
+            hover: None,
         }
     }
 }
