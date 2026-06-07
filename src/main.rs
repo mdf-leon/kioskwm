@@ -61,7 +61,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .create(true)
         .append(true)
         .open(&log_path)?;
-    eprintln!("kioskwm: log em {}", log_path.to_string_lossy());
+    eprintln!("kioskwm: log at {}", log_path.to_string_lossy());
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr.and(log_file))
         .init();
@@ -73,14 +73,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!("{}", env_detect::detection_debug());
 
     if args.desktop {
-        tracing::info!("Modo desktop (winit) — forçado via --desktop");
+        tracing::info!("Desktop mode (winit) — forced via --desktop");
         winit_backend::run(args, i18n)
     } else if env_detect::on_hardware_tty() {
         let tty = env_detect::controlling_tty().unwrap_or_default();
-        tracing::info!("VT {tty} — modo TTY (DRM + libseat)");
+        tracing::info!("VT {tty} — TTY mode (DRM + libseat)");
         tty::run(args, i18n)
     } else {
-        tracing::info!("Terminal gráfico — modo desktop (winit)");
+        tracing::info!("Nested session — desktop mode (winit)");
         winit_backend::run(args, i18n)
     }
 }

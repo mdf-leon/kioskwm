@@ -76,7 +76,7 @@ pub fn run(args: Args, i18n: I18n) -> Result<(), Box<dyn std::error::Error>> {
     schedule_spawn(spawn_plan, socket_name.clone(), args.spawn_delay_ms);
     if args.no_spawn || no_auto_spawn {
         tracing::info!(
-            "Modo no-spawn — conecte clientes em WAYLAND_DISPLAY={}",
+            "Modo no-spawn — connect clients with WAYLAND_DISPLAY={}",
             socket_name
         );
     }
@@ -204,16 +204,16 @@ pub fn run(args: Args, i18n: I18n) -> Result<(), Box<dyn std::error::Error>> {
 fn ensure_desktop_env() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::var_os("XDG_RUNTIME_DIR").is_none() {
         return Err(
-            "XDG_RUNTIME_DIR não está definido.\n\
-             Abra o Konsole ou Alacritty numa sessão gráfica e rode o kioskwm de lá."
+            "XDG_RUNTIME_DIR is not set.\n\
+             Run kioskwm from a graphical session (Konsole, Alacritty, etc.)."
                 .into(),
         );
     }
     if std::env::var_os("WAYLAND_DISPLAY").is_none() && std::env::var_os("DISPLAY").is_none() {
         return Err(format!(
-            "Nenhum display gráfico (WAYLAND_DISPLAY/DISPLAY) e VT não detectado.\n\
+            "No display (WAYLAND_DISPLAY/DISPLAY) and no hardware TTY detected.\n\
              {}\n\
-             Se você está num tty, isso é um bug — reporte o log acima.",
+             If you are on a TTY, this is a bug — check the log above.",
             crate::env_detect::detection_debug()
         )
         .into());

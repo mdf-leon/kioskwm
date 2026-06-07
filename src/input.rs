@@ -35,11 +35,19 @@ impl PointerTracker {
     }
 }
 
-fn queue_pointer_render(state: &mut State, time: u32) {
-    state.mark_pointer_moved(time);
-    if state.draw_compositor_cursor {
-        state.request_render_debounced(Duration::from_millis(16));
+fn deliver_pointer_motion(
+    state: &mut State,
+    pointer: &smithay::input::pointer::PointerHandle<State>,
+    location: Point<f64, Logical>,
+    time: u32,
+) {
+    if state.overlay_open || state.context_menu.open || state.alt_tab.open {
+        return;
     }
+    state.pointer_pos = location;
+    send_motion(state, pointer, location, time);
+    // Redraw contínuo — antes só renderizava no clique ou no cursor do compositor (TTY).
+    state.request_render_debounced(Duration::from_millis(8));
 }
 
 fn send_motion(
@@ -159,7 +167,7 @@ pub fn handle_input<B: InputBackend>(
                     state.request_render_debounced(Duration::from_millis(16));
                 }
             } else {
-                queue_pointer_render(state, event.time() as u32);
+                deliver_pointer_motion(state, &pointer, tracker.pos, event.time() as u32);
             }
         }
         InputEvent::PointerMotionAbsolute { event } => {
@@ -177,7 +185,7 @@ pub fn handle_input<B: InputBackend>(
                     state.request_render_debounced(Duration::from_millis(16));
                 }
             } else {
-                queue_pointer_render(state, event.time() as u32);
+                deliver_pointer_motion(state, &pointer, tracker.pos, event.time() as u32);
             }
         }
         InputEvent::PointerButton { event } => {
@@ -229,7 +237,6 @@ pub fn handle_input<B: InputBackend>(
                 state.pointer_pos.x,
                 state.pointer_pos.y
             );
-            state.flush_pointer_to_client();
             send_motion(state, &pointer, state.pointer_pos, time);
             let serial = state.next_serial();
             pointer.button(
