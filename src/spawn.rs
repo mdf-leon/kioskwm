@@ -12,7 +12,11 @@ use std::{
 
 use wayland_server::ListeningSocket;
 
-use crate::env_detect;
+use crate::Args;
+
+pub struct SpawnPlan {
+    pub command: Option<String>,
+}
 
 pub fn command_exists(name: &str) -> bool {
     let binary = name.split_whitespace().next().unwrap_or(name);
@@ -24,54 +28,70 @@ pub fn command_exists(name: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn terminal_from_env() -> Option<String> {
-    for var in ["KIOSKWM_TERMINAL", "TERMINAL"] {
-        if let Ok(term) = std::env::var(var) {
-            let term = term.trim().to_string();
-            if !term.is_empty() {
-                let binary = term.split_whitespace().next().unwrap_or(&term);
+fn app_from_env() -> Option<String> {
+    for var in ["KIOSKWM_APP", "KIOSKWM_TERMINAL", "TERMINAL"] {
+        if let Ok(app) = std::env::var(var) {
+            let app = app.trim().to_string();
+            if !app.is_empty() {
+                let binary = app.split_whitespace().next().unwrap_or(&app);
                 if command_exists(binary) {
-                    tracing::info!("Terminal via {var}: {term}");
-                    return Some(term);
+                    tracing::info!("App via {var}: {app}");
+                    return Some(app);
                 }
-                tracing::warn!("{var}={term} definido mas não encontrado no PATH");
+                tracing::warn!("{var}={app} definido mas não encontrado no PATH");
             }
         }
     }
     None
 }
 
-pub fn detect_terminal(on_tty: bool) -> String {
-    if let Some(term) = terminal_from_env() {
-        return term;
-    }
-
-    let _ = on_tty;
-    let candidates = &["konsole", "alacritty", "foot", "kitty", "wezterm", "ghostty"];
-
+pub fn detect_terminal() -> Option<String> {
+    let candidates = &["foot", "alacritty", "konsole", "kitty", "wezterm", "ghostty"];
     for candidate in candidates {
         if command_exists(candidate) {
-            return candidate.to_string();
+            return Some(candidate.to_string());
         }
     }
-
-    "konsole".to_string()
+    None
 }
 
-pub fn resolve_terminal(requested: &str) -> String {
-    let on_tty = env_detect::on_hardware_tty();
-
-    if requested != "auto" {
-        return requested.to_string();
+/// Resolve o que lançar na subida: app explícita, auto-detect ou nada (no-spawn silencioso).
+pub fn resolve_spawn(args: &Args) -> SpawnPlan {
+    if args.no_spawn {
+        tracing::info!("Modo no-spawn (--no-spawn)");
+        return SpawnPlan { command: None };
     }
 
-    let found = detect_terminal(on_tty);
+    let requested = args.app.trim();
+
+    if requested != "auto" {
+        let binary = requested.split_whitespace().next().unwrap_or(requested);
+        if command_exists(binary) {
+            return SpawnPlan {
+                command: Some(requested.to_string()),
+            };
+        }
+        tracing::warn!(
+            "App '{requested}' não encontrada no PATH — continuando sem auto-spawn"
+        );
+        return SpawnPlan { command: None };
+    }
+
+    if let Some(app) = app_from_env() {
+        return SpawnPlan { command: Some(app) };
+    }
+
+    if let Some(term) = detect_terminal() {
+        tracing::info!("Auto-spawn: emulador de terminal '{term}'");
+        return SpawnPlan {
+            command: Some(term),
+        };
+    }
+
     tracing::info!(
-        "Terminal auto-detectado: {} (ambiente: {})",
-        found,
-        if on_tty { "TTY" } else { "desktop" }
+        "Nenhum emulador de terminal no PATH — modo no-spawn (WAYLAND_DISPLAY aguardando clientes)"
     );
-    found
+    SpawnPlan { command: None }
 }
 
 fn user_shell() -> String {
@@ -506,8 +526,8 @@ fn apply_wayland_env(cmd: &mut Command, wayland_display: &str) {
         .env_remove("WAYLAND_SOCKET");
 }
 
-pub fn spawn_terminal(command: &str, wayland_display: &str) {
-    tracing::info!("Lançando terminal: {} (WAYLAND_DISPLAY={})", command, wayland_display);
+pub fn spawn_app(command: &str, wayland_display: &str) {
+    tracing::info!("Lançando app: {} (WAYLAND_DISPLAY={})", command, wayland_display);
 
     let scripts = write_client_env(wayland_display);
     let shell_init = scripts
@@ -566,16 +586,17 @@ pub fn spawn_terminal(command: &str, wayland_display: &str) {
     apply_wayland_env(&mut cmd, wayland_display);
 
     match cmd.spawn() {
-        Ok(_) => tracing::info!(
-            "Terminal iniciado — aba Konsole «kioskwm» (apps snap: digite krita)"
-        ),
-        Err(err) => tracing::error!("Falha ao iniciar {}: {}", command, err),
+        Ok(_) => tracing::info!("App iniciada: {command}"),
+        Err(err) => tracing::error!("Falha ao iniciar {command}: {err}"),
     }
 }
 
-pub fn schedule_spawn(command: String, wayland_display: String, delay_ms: u64) {
+pub fn schedule_spawn(plan: SpawnPlan, wayland_display: String, delay_ms: u64) {
+    let Some(command) = plan.command else {
+        return;
+    };
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_millis(delay_ms));
-        spawn_terminal(&command, &wayland_display);
+        spawn_app(&command, &wayland_display);
     });
 }

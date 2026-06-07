@@ -1,3 +1,4 @@
+mod console_backdrop;
 mod alt_tab;
 mod apps;
 mod backdrop;
@@ -29,19 +30,19 @@ use tracing_subscriber::fmt::writer::MakeWriterExt;
 #[derive(Parser, Debug)]
 #[command(author, version, about = "Kiosk WM — Wayland compositor for kiosk or nested desktop testing")]
 pub struct Args {
-    /// Terminal to launch: name, "auto", or via KIOSKWM_TERMINAL / TERMINAL
+    /// App to launch at startup: command or "auto" (via KIOSKWM_APP / -a)
     #[arg(short, long, default_value = "auto")]
-    terminal: String,
+    app: String,
 
     /// UI language code (en, pt). Overrides KIOSKWM_LANG and LANG.
     #[arg(long)]
     lang: Option<String>,
 
-    /// Do not spawn a terminal automatically
+    /// Do not spawn an app automatically at startup
     #[arg(long)]
     no_spawn: bool,
 
-    /// Delay in ms before spawning the terminal (wait for the socket)
+    /// Delay in ms before spawning (wait for the Wayland socket)
     #[arg(long, default_value_t = 300)]
     spawn_delay_ms: u64,
 

@@ -117,7 +117,7 @@
       <h3>Nested mode (development / testing on KDE, GNOME, etc.)</h3>
       <p>Runs inside a window using the parent compositor (Plasma, etc.). Ideal for hacking in Konsole:</p>
       <pre><code>kioskwm --desktop</code></pre>
-      <p>By default it spawns a terminal (Konsole, Alacritty, …) connected to kioskwm’s Wayland socket.</p>
+      <p>By default it auto-spawns an app: any terminal emulator found on PATH, or nothing if none is installed (no error).</p>
 
       <h3>TTY / kiosk mode (production)</h3>
       <p>Fullscreen compositor on the GPU (DRM + libseat). Auto-detected on a hardware VT (<code>/dev/tty1</code>, <code>tty2</code>, …):</p>
@@ -132,10 +132,10 @@ kioskwm</code></pre>
         <thead><tr><th>Flag</th><th>Description</th></tr></thead>
         <tbody>
           <tr><td><code>--desktop</code></td><td>Force nested (winit) mode, even on a TTY.</td></tr>
-          <tr><td><code>--no-spawn</code></td><td>Do not spawn a terminal automatically.</td></tr>
-          <tr><td><code>-t NAME</code></td><td>Terminal to spawn (<code>auto</code>, <code>konsole</code>, <code>alacritty</code>, …).</td></tr>
+          <tr><td><code>--no-spawn</code></td><td>Do not spawn an app automatically at startup.</td></tr>
+          <tr><td><code>-a CMD</code></td><td>App to spawn (<code>auto</code>, <code>foot</code>, <code>firefox</code>, <code>firefox --kiosk URL</code>, …).</td></tr>
           <tr><td><code>--lang pt</code></td><td>WM UI language (<code>en</code>, <code>pt</code>).</td></tr>
-          <tr><td><code>--spawn-delay-ms N</code></td><td>Delay before spawning the terminal (default 300 ms).</td></tr>
+          <tr><td><code>--spawn-delay-ms N</code></td><td>Delay before spawning (default 300 ms).</td></tr>
           <tr><td><code>--help</code> / <code>--version</code></td><td>Help and version.</td></tr>
         </tbody>
       </table>
@@ -144,7 +144,8 @@ kioskwm</code></pre>
       <table>
         <thead><tr><th>Variable</th><th>Description</th></tr></thead>
         <tbody>
-          <tr><td><code>KIOSKWM_TERMINAL</code> / <code>TERMINAL</code></td><td>Preferred terminal for auto-spawn.</td></tr>
+          <tr><td><code>KIOSKWM_APP</code></td><td>Preferred app for <code>-a auto</code> (any command).</td></tr>
+          <tr><td><code>KIOSKWM_TERMINAL</code> / <code>TERMINAL</code></td><td>Legacy alias for <code>KIOSKWM_APP</code>.</td></tr>
           <tr><td><code>KIOSKWM_LANG</code></td><td>UI language (<code>pt</code>, <code>en</code>).</td></tr>
           <tr><td><code>KIOSKWM_LOG</code></td><td>Log file path (default <code>/tmp/kioskwm.log</code>).</td></tr>
           <tr><td><code>RUST_LOG</code></td><td>Rust log level (e.g. <code>kioskwm=debug</code>).</td></tr>
@@ -265,12 +266,13 @@ cargo build --release</code></pre>
       <pre><code># minimal graphics base + kioskwm
 curl -fsSL https://raw.githubusercontent.com/mdf-leon/kioskwm/main/install/install.sh | bash
 
-# terminal (pick one)
-sudo apt install -y foot   # lightweight, Wayland-native
-# or: sudo apt install -y konsole alacritty
+# optional — terminal OR any Wayland kiosk app
+sudo apt install -y foot              # lightweight terminal
+# sudo apt install -y firefox-esr     # browser kiosk with -a firefox
 
 # GPU driver and utils (Intel/AMD; adjust for NVIDIA)
 sudo apt install -y mesa-utils libgl1</code></pre>
+      <p>With <code>-a auto</code> (default), kioskwm tries <code>foot</code>, <code>alacritty</code>, <code>konsole</code>, … If none is installed, it continues in <strong>no-spawn</strong> mode (no error) and shows a console-style background until a client connects.</p>
 
       <h3>What to configure</h3>
       <ol>
@@ -284,7 +286,7 @@ PAMName=login
 TTYPath=/dev/tty1
 StandardInput=tty
 StandardOutput=journal
-ExecStart=/usr/local/bin/kioskwm --no-spawn
+ExecStart=/usr/local/bin/kioskwm -a firefox --kiosk https://example.com
 Restart=on-failure</code></pre>
         </li>
         <li><strong>Autologin on a TTY</strong> — override <code>getty@tty1</code> or use a kiosk user whose shell runs <code>kioskwm</code>.</li>
@@ -301,7 +303,8 @@ Restart=on-failure</code></pre>
       <h3>Quick checklist on a clean Ubuntu Server</h3>
       <pre><code>sudo apt update
 curl -fsSL https://raw.githubusercontent.com/mdf-leon/kioskwm/main/install/install.sh | bash
-sudo apt install -y foot mesa-utils
+sudo apt install -y mesa-utils
+# kioskwm alone is enough — console-style screen if no terminal installed
 # autologin + ExecStart=kioskwm on tty1
 # reboot and test</code></pre>
     </section>

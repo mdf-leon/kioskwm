@@ -197,9 +197,33 @@ impl crate::state::State {
         let keyboard = self.keyboard.clone();
         let serial = self.next_serial();
         keyboard.set_focus(self, None, serial);
+        if let Some(idx) = self.pending_autofocus.take() {
+            if self.wm_ui_blocks_focus() {
+                self.pending_autofocus = Some(idx);
+            } else {
+                self.focus_unified(idx);
+            }
+        }
         self.dispatch_input_focus();
         self.refresh_active_surface();
         self.push_modifiers_to_focus();
+    }
+
+    pub fn wm_ui_blocks_focus(&self) -> bool {
+        self.context_menu.open || self.overlay_open || self.alt_tab.open
+    }
+
+    /// Foca app recém-aberta; adia se menu/overlay WM estiver aberto.
+    pub fn autofocus_new_unified(&mut self, unified_idx: usize, name: &str) {
+        if self.wm_ui_blocks_focus() {
+            self.pending_autofocus = Some(unified_idx);
+            self.deferred_focus = true;
+            tracing::info!("Nova app {name} — foco adiado (UI WM aberta)");
+            return;
+        }
+        self.pending_autofocus = None;
+        tracing::info!("Nova app {name} — foco automático");
+        self.focus_unified(unified_idx);
     }
 
     fn release_keyboard_grab(&mut self) {
@@ -340,6 +364,13 @@ impl crate::state::State {
             self.apply_focus();
             return;
         }
+        if !self.focused_is_x11
+            && self.focused_app != index
+            && self.focused_app < self.running_apps.len()
+        {
+            let old = self.running_apps[self.focused_app].surface.clone();
+            self.configure_toplevel(&old, false);
+        }
         if self.focused_is_x11 {
             self.leave_x11_input();
         }
@@ -450,7 +481,7 @@ impl crate::state::State {
     }
 
     pub fn apply_focus(&mut self) {
-        if self.context_menu.open || self.overlay_open || self.alt_tab.open {
+        if self.wm_ui_blocks_focus() {
             self.deferred_focus = true;
             return;
         }
@@ -465,8 +496,11 @@ impl crate::state::State {
             return;
         }
         self.deferred_focus = false;
-        if self.context_menu.open || self.overlay_open || self.alt_tab.open {
+        if self.wm_ui_blocks_focus() {
             return;
+        }
+        if let Some(idx) = self.pending_autofocus.take() {
+            self.focus_unified(idx);
         }
         self.dispatch_input_focus();
     }
