@@ -8,6 +8,16 @@ pub fn on_hardware_tty() -> bool {
         .unwrap_or(false)
 }
 
+/// Rodando como cliente de outro compositor (Konsole/Plasma), não num VT de hardware.
+pub fn nested_in_parent_session() -> bool {
+    !on_hardware_tty() && has_graphical_session()
+}
+
+/// O compositor pai (KWin, Mutter, etc.) pode consumir atalhos globais antes do winit.
+pub fn parent_steals_global_shortcuts() -> bool {
+    nested_in_parent_session()
+}
+
 pub fn is_kde_session() -> bool {
     std::env::var("XDG_CURRENT_DESKTOP")
         .map(|v| v.to_lowercase().contains("kde"))

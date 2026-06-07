@@ -29,6 +29,7 @@ struct EvdevMods {
     ctrl: bool,
     alt: bool,
     shift: bool,
+    meta: bool,
 }
 
 struct ScancodeMods {
@@ -38,20 +39,30 @@ struct ScancodeMods {
 }
 
 pub fn spawn(ctx: Arc<EmergencyContext>) {
+    let nested = env_detect::parent_steals_global_shortcuts();
     thread::Builder::new()
         .name("kioskwm-kill".into())
-        .spawn(move || kill_switch_thread(ctx))
+        .spawn(move || kill_switch_thread(ctx, nested))
         .ok();
-    tracing::info!(
-        "Fallback hardware: P0=Shift+Del sai, F1-F12/0-9 troca VT; P1=Del painel"
-    );
+    if nested {
+        tracing::info!(
+            "Fallback evdev (sessão aninhada): P0=Shift+Del sai, F1-F12/0-9 VT; \
+             P1=Del/Ctrl+Shift+Esc/Super+Esc painel"
+        );
+    } else {
+        tracing::info!(
+            "Fallback hardware: P0=Shift+Del sai, F1-F12/0-9 VT; \
+             P1=Del/Ctrl+Shift+Esc/Super+Esc painel"
+        );
+    }
 }
 
-fn kill_switch_thread(ctx: Arc<EmergencyContext>) {
+fn kill_switch_thread(ctx: Arc<EmergencyContext>, nested: bool) {
     let mut evdev_mods = EvdevMods {
         ctrl: false,
         alt: false,
         shift: false,
+        meta: false,
     };
     let mut scan_mods = ScancodeMods {
         ctrl: false,
@@ -85,6 +96,12 @@ fn kill_switch_thread(ctx: Arc<EmergencyContext>) {
         }
 
         if fds.is_empty() {
+            if nested {
+                tracing::warn!(
+                    "Fallback evdev sem /dev/input — atalhos P0/P1 podem não funcionar no desktop. \
+                     Adicione seu usuário ao grupo 'input' ou rode com acesso ao teclado."
+                );
+            }
             thread::sleep(Duration::from_secs(2));
             continue;
         }
@@ -105,9 +122,14 @@ fn kill_switch_thread(ctx: Arc<EmergencyContext>) {
                     continue;
                 }
                 update_evdev_mods(&mut evdev_mods, ev.code, ev.value != 0);
-                if let Some(action) =
-                    emergency::match_evdev(evdev_mods.ctrl, evdev_mods.alt, evdev_mods.shift, ev.value != 0, ev.code)
-                {
+                if let Some(action) = emergency::match_evdev(
+                    evdev_mods.ctrl,
+                    evdev_mods.alt,
+                    evdev_mods.shift,
+                    evdev_mods.meta,
+                    ev.value != 0,
+                    ev.code,
+                ) {
                     dispatch_hardware(action, &ctx);
                 }
             }
@@ -163,6 +185,7 @@ fn update_evdev_mods(mods: &mut EvdevMods, code: u16, pressed: bool) {
         29 | 97 => mods.ctrl = pressed,
         56 | 100 => mods.alt = pressed,
         42 | 54 => mods.shift = pressed,
+        125 | 126 => mods.meta = pressed,
         _ => {}
     }
 }
@@ -190,6 +213,7 @@ fn match_scancode(byte: u8, extended: bool, mods: &mut ScancodeMods) -> Option<E
             mods.shift = true;
             None
         }
+        0x01 if mods.ctrl && mods.shift && !mods.alt => Some(EmergencyAction::ToggleOverlay),
         0x53 => {
             let _ = extended;
             if mods.ctrl && mods.alt && mods.shift {
@@ -205,6 +229,21 @@ fn match_scancode(byte: u8, extended: bool, mods: &mut ScancodeMods) -> Option<E
         }
         _ => None,
     }
+}
+
+fn is_keyboard_device(event_name: &str) -> bool {
+    let sysfs_ev = format!("/sys/class/input/{event_name}/device/capabilities/ev");
+    let sysfs_key = format!("/sys/class/input/{event_name}/device/capabilities/key");
+    let has_ev_key = std::fs::read_to_string(&sysfs_ev)
+        .ok()
+        .is_some_and(|cap| {
+            let cap = cap.trim();
+            cap.len() >= 2 && cap.chars().nth(1).is_some_and(|c| c == '1' || c > '1')
+        });
+    let has_keys = std::fs::read_to_string(&sysfs_key)
+        .ok()
+        .is_some_and(|cap| cap.trim().chars().any(|c| c != '0'));
+    has_ev_key && has_keys
 }
 
 fn open_controlling_tty() -> Option<File> {
@@ -224,21 +263,14 @@ fn set_medium_raw(fd: i32) -> bool {
 
 fn open_keyboard_devices() -> Vec<File> {
     let mut out = Vec::new();
-    let Ok(dir) = std::fs::read_dir("/dev/input") else {
+        let Ok(dir) = std::fs::read_dir("/dev/input") else {
         return out;
     };
     for entry in dir.flatten() {
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        if !name.starts_with("event") {
+        if !name.starts_with("event") || !is_keyboard_device(&name) {
             continue;
-        }
-        let sysfs_ev = format!("/sys/class/input/{name}/device/capabilities/ev");
-        if let Ok(cap) = std::fs::read_to_string(&sysfs_ev) {
-            let cap = cap.trim();
-            if cap.len() < 2 || !cap.chars().nth(1).is_some_and(|c| c == '1' || c > '1') {
-                continue;
-            }
         }
         if let Ok(f) = OpenOptions::new().read(true).open(entry.path()) {
             out.push(f);

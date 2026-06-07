@@ -195,7 +195,13 @@ impl TtyLoop {
             self.start_time.elapsed().as_millis() as u32,
         );
 
-        let rounds = if self.state.active_popup.is_some() { 10 } else { 2 };
+        let rounds = if self.state.overlay_open {
+            1
+        } else if self.state.active_popup.is_some() {
+            10
+        } else {
+            2
+        };
         if let Err(err) =
             accept_clients_rounds(&mut self.display, &mut self.state, &self.listener, rounds)
         {
@@ -280,7 +286,7 @@ pub fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
 
     tracing::info!("Socket Wayland do kioskwm: {}", socket_name);
 
-    let overlay = OverlayControl::new();
+    let overlay = OverlayControl::with_loop_wake(true);
     let emergency = std::sync::Arc::new(EmergencyContext::new(
         state.exit_requested.clone(),
         overlay.clone(),

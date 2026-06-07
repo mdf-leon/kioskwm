@@ -8,9 +8,9 @@ use std::{
 
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
 
-pub struct OverlayPanelCache {
+pub struct SettingsPanelCache {
     pub buffer: MemoryRenderBuffer,
-    pub speed_bits: u64,
+    pub key: u64,
 }
 
 use smithay::{
@@ -88,7 +88,8 @@ pub struct State {
     pub overlay_open: bool,
     /// Multiplicador de movimento do ponteiro (1.0 = padrao).
     pub pointer_speed: f64,
-    pub overlay_panel: Mutex<Option<OverlayPanelCache>>,
+    pub settings: crate::settings::SettingsState,
+    pub settings_cache: Mutex<Option<SettingsPanelCache>>,
     serial: u32,
 }
 
@@ -675,7 +676,8 @@ pub fn init_state(
         exit_requested,
         overlay_open: false,
         pointer_speed: 1.0,
-        overlay_panel: Mutex::new(None),
+        settings: crate::settings::SettingsState::default(),
+        settings_cache: Mutex::new(None),
         serial: 0,
     })
 }

@@ -15,6 +15,7 @@ use crate::{
     emergency::EmergencyContext,
     kill_switch,
     overlay::OverlayControl,
+    parent_shortcuts::ParentShortcutGuard,
     render::{render_kiosk_frame, send_frame_callbacks},
     spawn::{command_exists, resolve_terminal, schedule_spawn},
     state::{accept_clients, accept_clients_rounds, init_state, new_exit_flag, should_exit, State},
@@ -74,6 +75,7 @@ pub fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     tracing::info!("Janela do compositor aberta — feche-a para sair");
+    crate::parent_shortcuts::log_workaround();
 
     let overlay = OverlayControl::new();
     let emergency = std::sync::Arc::new(EmergencyContext::new(
@@ -81,6 +83,8 @@ pub fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         overlay.clone(),
     ));
     kill_switch::spawn(emergency.clone());
+
+    let mut shortcut_guard = ParentShortcutGuard::try_new(backend.window());
 
     let start_time = Instant::now();
     let mut pointer_tracker = PointerTracker::new(state.output_size);
@@ -93,6 +97,11 @@ pub fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             WinitEvent::Resized { size, .. } => {
                 state.update_output_mode(size);
                 pointer_tracker.clamp(state.output_size);
+            }
+            WinitEvent::Focus(focused) => {
+                if let Some(guard) = shortcut_guard.as_mut() {
+                    guard.on_focus(focused);
+                }
             }
             WinitEvent::Input(event) => {
                 handle_input(

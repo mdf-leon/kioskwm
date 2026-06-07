@@ -124,30 +124,42 @@ pub fn handle_input<B: InputBackend>(
             );
         }
         InputEvent::PointerMotion { event } => {
-            tracker.pos.x += event.delta_x() * speed;
-            tracker.pos.y += event.delta_y() * speed;
+            let motion_scale = if state.overlay_open { 1.0 } else { speed };
+            tracker.pos.x += event.delta_x() * motion_scale;
+            tracker.pos.y += event.delta_y() * motion_scale;
             tracker.clamp(state.output_size);
             state.pointer_pos = tracker.pos;
-            send_motion(state, &pointer, tracker.pos, event.time() as u32);
+            if state.overlay_open {
+                crate::settings::input::handle_pointer_motion(state, tracker.pos);
+            } else {
+                send_motion(state, &pointer, tracker.pos, event.time() as u32);
+            }
         }
         InputEvent::PointerMotionAbsolute { event } => {
             let pos = Point::<f64, Logical>::from((event.x(), event.y()));
-            if speed != 1.0 && state.overlay_open {
-                let cx = state.output_size.w as f64 / 2.0;
-                let cy = state.output_size.h as f64 / 2.0;
-                tracker.pos = Point::from((
-                    cx + (pos.x - cx) * speed,
-                    cy + (pos.y - cy) * speed,
-                ));
-            } else {
-                tracker.pos = pos;
-            }
+            tracker.pos = pos;
             tracker.clamp(state.output_size);
             state.pointer_pos = tracker.pos;
-            send_motion(state, &pointer, tracker.pos, event.time() as u32);
+            if state.overlay_open {
+                crate::settings::input::handle_pointer_motion(state, tracker.pos);
+            } else {
+                send_motion(state, &pointer, tracker.pos, event.time() as u32);
+            }
         }
         InputEvent::PointerButton { event } => {
             if state.overlay_open {
+                const BTN_LEFT: u32 = 0x110;
+                if event.button_code() == BTN_LEFT {
+                    let pressed = event.state() == ButtonState::Pressed;
+                    crate::settings::input::handle_pointer_button(
+                        state,
+                        tracker.pos,
+                        pressed,
+                    );
+                    if !pressed {
+                        crate::settings::input::handle_pointer_release(state);
+                    }
+                }
                 return;
             }
             let time = event.time() as u32;

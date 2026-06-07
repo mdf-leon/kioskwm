@@ -1,6 +1,6 @@
 //! Prioridades de atalho:
 //! - P0: cursor sempre por cima; Ctrl+Alt+Shift+Del encerra; Ctrl+Alt+F1–F12 ou Ctrl+Alt+0–9 troca VT.
-//! - P1: Ctrl+Alt+Del (painel) — interceptado no compositor antes dos clientes.
+//! - P1: Ctrl+Alt+Del, Ctrl+Shift+Esc ou Super+Esc (painel) — interceptado no compositor antes dos clientes.
 
 use std::{
     process::Command,
@@ -23,7 +23,7 @@ use crate::{
 pub enum EmergencyAction {
     /// P0: encerrar compositor (Ctrl+Alt+Shift+Del)
     ForceQuit,
-    /// P1: painel (Ctrl+Alt+Del)
+    /// P1: painel (Ctrl+Alt+Del, Ctrl+Shift+Esc ou Super+Esc)
     ToggleOverlay,
     /// P0: troca de VT (Ctrl+Alt+F1–F12 ou Ctrl+Alt+0–9)
     SwitchVt(u8),
@@ -85,10 +85,20 @@ impl EmergencyContext {
 }
 
 pub fn match_combo(modifiers: &ModifiersState, keysym: &KeysymHandle<'_>) -> Option<EmergencyAction> {
-    if !(modifiers.ctrl || modifiers.logo) || !modifiers.alt {
+    let sym = keysym.modified_sym().raw();
+
+    if modifiers.logo && is_escape(sym) {
+        return Some(EmergencyAction::ToggleOverlay);
+    }
+
+    if modifiers.ctrl && modifiers.shift && !modifiers.alt && is_escape(sym) {
+        return Some(EmergencyAction::ToggleOverlay);
+    }
+
+    let ctrl = modifiers.ctrl || modifiers.logo;
+    if !ctrl || !modifiers.alt {
         return None;
     }
-    let sym = keysym.modified_sym().raw();
     if modifiers.shift {
         if is_delete(sym) {
             return Some(EmergencyAction::ForceQuit);
@@ -99,6 +109,10 @@ pub fn match_combo(modifiers: &ModifiersState, keysym: &KeysymHandle<'_>) -> Opt
         return Some(EmergencyAction::ToggleOverlay);
     }
     vt_from_keysym(sym).map(EmergencyAction::SwitchVt)
+}
+
+fn is_escape(sym: u32) -> bool {
+    sym == keysyms::KEY_Escape as u32
 }
 
 fn is_delete(sym: u32) -> bool {
@@ -179,21 +193,37 @@ pub fn force_quit(exit_flag: &AtomicBool) {
 pub fn do_vt_switch(vt: u8) {
     tracing::info!("P0 — ativando tty{vt}");
     const VT_ACTIVATE: libc::c_ulong = 0x5606;
+    const VT_WAITACTIVE: libc::c_ulong = 0x5607;
+    const VT_RELDISP: libc::c_ulong = 0x5605;
+
+    if let Some(tty_path) = crate::env_detect::controlling_tty() {
+        if let Ok(ctrl) = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&tty_path)
+        {
+            use std::os::fd::AsRawFd;
+            let fd = ctrl.as_raw_fd();
+            unsafe {
+                libc::ioctl(fd, VT_RELDISP, 1i32);
+            }
+            tracing::info!("VT_RELDISP em {tty_path}");
+        }
+    }
+
     if let Ok(tty0) = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
         .open("/dev/tty0")
     {
         use std::os::fd::AsRawFd;
-        let ret = unsafe {
-            libc::ioctl(
-                tty0.as_raw_fd(),
-                VT_ACTIVATE,
-                vt as libc::c_ulong,
-            )
-        };
+        let fd = tty0.as_raw_fd();
+        let ret = unsafe { libc::ioctl(fd, VT_ACTIVATE, vt as libc::c_ulong) };
         if ret == 0 {
-            tracing::info!("ioctl VT_ACTIVATE tty{vt} ok");
+            unsafe {
+                libc::ioctl(fd, VT_WAITACTIVE, vt as libc::c_ulong);
+            }
+            tracing::info!("ioctl VT_ACTIVATE/WAIT tty{vt} ok");
             return;
         }
         tracing::warn!(
@@ -201,6 +231,17 @@ pub fn do_vt_switch(vt: u8) {
             std::io::Error::last_os_error()
         );
     }
+
+    if Command::new("openvt")
+        .args(["-s", "-w", &vt.to_string()])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+    {
+        tracing::info!("openvt {vt} ok");
+        return;
+    }
+
     match Command::new("chvt").arg(vt.to_string()).status() {
         Ok(status) if status.success() => tracing::info!("chvt {vt} ok"),
         Ok(status) => tracing::warn!("chvt {vt} retornou {status}"),
@@ -235,31 +276,41 @@ pub fn compositor_keyboard_filter(
 
 fn overlay_panel_filter(
     state: &mut State,
-    _modifiers: &ModifiersState,
+    modifiers: &ModifiersState,
     keysym: &KeysymHandle<'_>,
     key_state: smithay::backend::input::KeyState,
 ) -> FilterResult<()> {
-    use smithay::backend::input::KeyState;
-
-    if key_state != KeyState::Pressed {
-        return FilterResult::Intercept(());
-    }
-    let sym = keysym.modified_sym().raw();
-    // DEBUG: so Esc fecha o painel.
-    if sym == keysyms::KEY_Escape as u32 {
-        state.overlay_open = false;
-    }
-    FilterResult::Intercept(())
+    crate::settings::input::keyboard_filter(state, modifiers, keysym, key_state)
 }
 
 /// Evdev: mesma logica P0/P1 para quando o thread consegue ler hardware direto.
-pub fn match_evdev(ctrl: bool, alt: bool, shift: bool, pressed: bool, code: u16) -> Option<EmergencyAction> {
-    if !pressed || !ctrl || !alt {
+pub fn match_evdev(
+    ctrl: bool,
+    alt: bool,
+    shift: bool,
+    meta: bool,
+    pressed: bool,
+    code: u16,
+) -> Option<EmergencyAction> {
+    if !pressed {
         return None;
     }
+    const KEY_ESC: u16 = 1;
     const KEY_DELETE: u16 = 111;
     const KEY_F1: u16 = 59;
     const KEY_F12: u16 = 70;
+    if code == KEY_ESC && meta {
+        return Some(EmergencyAction::ToggleOverlay);
+    }
+    if !ctrl {
+        return None;
+    }
+    if shift && !alt && code == KEY_ESC {
+        return Some(EmergencyAction::ToggleOverlay);
+    }
+    if !alt {
+        return None;
+    }
     if shift && code == KEY_DELETE {
         return Some(EmergencyAction::ForceQuit);
     }
