@@ -113,8 +113,10 @@ resolve_latest_tag() {
     need_cmd curl
     local api="https://api.github.com/repos/${REPO}/releases/latest"
     local tag
-    tag="$(curl -fsSL "$api" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
-    [ -n "$tag" ] || die "nenhum release encontrado em github.com/${REPO} — aguarde o CI publicar v0.1.0"
+    tag="$(
+        curl -fsSL "$api" | python3 -c 'import sys, json; print(json.load(sys.stdin)["tag_name"])'
+    )"
+    [ -n "$tag" ] || die "nenhum release encontrado em github.com/${REPO}"
     printf '%s' "$tag"
 }
 
@@ -152,6 +154,7 @@ main() {
     detect_os
     detect_arch
     need_cmd curl
+    command -v python3 >/dev/null 2>&1 || die "python3 é necessário para resolver releases"
 
     local tag="$VERSION"
     if [ "$tag" = "latest" ]; then
