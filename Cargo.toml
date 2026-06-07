@@ -1,0 +1,35 @@
+[package]
+name = "kioskwm"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+smithay = { version = "0.7.0", features = [
+    "backend_winit",
+    "backend_drm",
+    "backend_gbm",
+    "backend_libinput",
+    "backend_udev",
+    "backend_session_libseat",
+    "desktop",
+    "renderer_gl",
+    "use_system_lib",
+    "xwayland",
+] }
+wayland-protocols = { version = "0.32", features = ["server", "client", "unstable"] }
+wayland-server = "0.31"
+wayland-client = "0.31"
+wayland-backend = { version = "0.3", features = ["client_system"] }
+raw-window-handle = "0.6"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+clap = { version = "4.0", features = ["derive"] }
+winit = "0.30"
+xkbcommon = "0.8"
+calloop = { version = "0.14", features = ["signals"] }
+xcursor = "0.3"
+libc = "0.2"
+fontdue = "0.9"
+resvg = "0.44"
+usvg = "0.44"
+tiny-skia = "0.11"

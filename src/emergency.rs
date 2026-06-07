@@ -1,0 +1,421 @@
+//! Prioridades de atalho:
+//! - P0: cursor sempre por cima; Ctrl+Alt+Shift+Del encerra; Ctrl+Alt+F1–F12 ou Ctrl+Alt+0–9 troca VT.
+//! - P1: Ctrl+Alt+Del, Ctrl+Shift+Esc ou Super+Esc (painel) — interceptado no compositor antes dos clientes.
+
+use std::{
+    process::Command,
+    sync::{
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc,
+    },
+};
+
+use smithay::{
+    backend::session::Session,
+    input::keyboard::{FilterResult, KeysymHandle, ModifiersState},
+};
+use xkbcommon::xkb::keysyms;
+
+use crate::{
+    context_menu::ContextMenuControl,
+    overlay::OverlayControl,
+    state::{request_exit, State},
+};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EmergencyAction {
+    /// P0: encerrar compositor (Ctrl+Alt+Shift+Del)
+    ForceQuit,
+    /// P1: painel (Ctrl+Alt+Del, Ctrl+Shift+Esc ou Super+Esc)
+    ToggleOverlay,
+    /// P0: troca de VT (Ctrl+Alt+F1–F12 ou Ctrl+Alt+0–9)
+    SwitchVt(u8),
+}
+
+static LAST_P1_MS: AtomicU64 = AtomicU64::new(0);
+static LAST_P0_VT_MS: AtomicU64 = AtomicU64::new(0);
+const P1_DEBOUNCE_MS: u64 = 250;
+const P0_VT_DEBOUNCE_MS: u64 = 200;
+
+/// Evita que compositor + thread evdev executem o mesmo P1 duas vezes na mesma tecla.
+pub fn try_p1_debounce() -> bool {
+    debounce_ms(&LAST_P1_MS, P1_DEBOUNCE_MS)
+}
+
+/// Evita duplo envio compositor + evdev na mesma tecla (nao compartilha debounce com P1).
+pub fn try_p0_vt_debounce() -> bool {
+    debounce_ms(&LAST_P0_VT_MS, P0_VT_DEBOUNCE_MS)
+}
+
+fn debounce_ms(slot: &AtomicU64, window_ms: u64) -> bool {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let prev = slot.swap(now, Ordering::SeqCst);
+    now.saturating_sub(prev) >= window_ms
+}
+
+pub struct EmergencyContext {
+    pub exit_flag: Arc<AtomicBool>,
+    pub overlay: Arc<OverlayControl>,
+    pub menu: Arc<ContextMenuControl>,
+}
+
+impl EmergencyContext {
+    pub fn new(exit_flag: Arc<AtomicBool>, overlay: Arc<OverlayControl>, menu: Arc<ContextMenuControl>) -> Self {
+        Self {
+            exit_flag,
+            overlay,
+            menu,
+        }
+    }
+}
+
+pub fn match_combo(modifiers: &ModifiersState, keysym: &KeysymHandle<'_>) -> Option<EmergencyAction> {
+    let sym = keysym.modified_sym().raw();
+
+    if modifiers.logo && is_escape(sym) {
+        return Some(EmergencyAction::ToggleOverlay);
+    }
+
+    if modifiers.ctrl && modifiers.shift && !modifiers.alt && is_escape(sym) {
+        return Some(EmergencyAction::ToggleOverlay);
+    }
+
+    let ctrl = modifiers.ctrl || modifiers.logo;
+    if !ctrl || !modifiers.alt {
+        return None;
+    }
+    if modifiers.shift {
+        if is_delete(sym) {
+            return Some(EmergencyAction::ForceQuit);
+        }
+        return None;
+    }
+    if is_delete(sym) {
+        return Some(EmergencyAction::ToggleOverlay);
+    }
+    vt_from_keysym_handle(keysym).map(EmergencyAction::SwitchVt)
+}
+
+fn vt_from_keysym_handle(keysym: &KeysymHandle<'_>) -> Option<u8> {
+    if let Some(vt) = vt_from_keysym(keysym.modified_sym().raw()) {
+        return Some(vt);
+    }
+    for sym in keysym.raw_syms() {
+        if let Some(vt) = vt_from_keysym(sym.raw()) {
+            return Some(vt);
+        }
+    }
+    None
+}
+
+fn is_escape(sym: u32) -> bool {
+    sym == keysyms::KEY_Escape as u32
+}
+
+fn is_delete(sym: u32) -> bool {
+    sym == keysyms::KEY_Delete as u32 || sym == keysyms::KEY_KP_Delete as u32
+}
+
+fn vt_from_keysym(sym: u32) -> Option<u8> {
+    match sym {
+        k if k == keysyms::KEY_1 as u32 => Some(1),
+        k if k == keysyms::KEY_2 as u32 => Some(2),
+        k if k == keysyms::KEY_3 as u32 => Some(3),
+        k if k == keysyms::KEY_4 as u32 => Some(4),
+        k if k == keysyms::KEY_5 as u32 => Some(5),
+        k if k == keysyms::KEY_6 as u32 => Some(6),
+        k if k == keysyms::KEY_7 as u32 => Some(7),
+        k if k == keysyms::KEY_8 as u32 => Some(8),
+        k if k == keysyms::KEY_9 as u32 => Some(9),
+        k if k == keysyms::KEY_0 as u32 => Some(10),
+        k if k == keysyms::KEY_F1 as u32 => Some(1),
+        k if k == keysyms::KEY_F2 as u32 => Some(2),
+        k if k == keysyms::KEY_F3 as u32 => Some(3),
+        k if k == keysyms::KEY_F4 as u32 => Some(4),
+        k if k == keysyms::KEY_F5 as u32 => Some(5),
+        k if k == keysyms::KEY_F6 as u32 => Some(6),
+        k if k == keysyms::KEY_F7 as u32 => Some(7),
+        k if k == keysyms::KEY_F8 as u32 => Some(8),
+        k if k == keysyms::KEY_F9 as u32 => Some(9),
+        k if k == keysyms::KEY_F10 as u32 => Some(10),
+        k if k == keysyms::KEY_F11 as u32 => Some(11),
+        k if k == keysyms::KEY_F12 as u32 => Some(12),
+        _ => None,
+    }
+}
+
+/// Libera grabs/foco dos clientes para o painel ficar por cima e receber teclas.
+pub fn seize_for_overlay(state: &mut State) {
+    if state.pointer.is_grabbed() {
+        let pointer = state.pointer.clone();
+        let serial = state.next_serial();
+        pointer.unset_grab(state, serial, 0);
+    }
+    let keyboard = state.keyboard.clone();
+    let serial = state.next_serial();
+    keyboard.set_focus(state, None, serial);
+    tracing::info!("Painel P1: input dos clientes bloqueado");
+}
+
+pub fn execute(
+    action: EmergencyAction,
+    ctx: &EmergencyContext,
+    state: &mut State,
+    tty_vt: Option<&mut TtyVtControl<'_>>,
+) {
+    match action {
+        EmergencyAction::ForceQuit => force_quit(&ctx.exit_flag),
+        EmergencyAction::ToggleOverlay => {
+            if try_p1_debounce() {
+                ctx.overlay.toggle_now(state);
+            }
+        }
+        EmergencyAction::SwitchVt(vt) => {
+            if try_p0_vt_debounce() {
+                tracing::info!("P0 — troca imediata para tty{vt}");
+                perform_vt_switch(vt, tty_vt);
+            }
+        }
+    }
+}
+
+pub fn force_quit(exit_flag: &AtomicBool) {
+    tracing::error!("P0 KILL — encerrando compositor");
+    request_exit(exit_flag);
+    unsafe {
+        libc::raise(libc::SIGUSR1);
+    }
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    tracing::error!("P0 KILL — _exit");
+    unsafe {
+        libc::_exit(0);
+    }
+}
+
+pub struct TtyVtControl<'a> {
+    pub libinput: &'a mut smithay::reexports::input::Libinput,
+    pub device: &'a mut smithay::backend::drm::DrmDevice,
+    pub session: &'a mut smithay::backend::session::libseat::LibSeatSession,
+}
+
+/// Pausa DRM/libinput e troca de VT (TTY). No desktop aninhado só chvt.
+pub fn perform_vt_switch(vt: u8, tty: Option<&mut TtyVtControl<'_>>) {
+    if let Some(ctx) = tty {
+        tracing::info!("P0 — pausando DRM/libinput antes de tty{vt}");
+        ctx.libinput.suspend();
+        let _ = ctx.device.pause();
+        do_vt_switch(vt);
+        match ctx.session.change_vt(vt as i32) {
+            Ok(()) => tracing::info!("libseat change_vt({vt}) ok"),
+            Err(err) => tracing::warn!("libseat change_vt({vt}): {err}"),
+        }
+    } else {
+        do_vt_switch(vt);
+    }
+}
+
+/// Troca de VT no kernel (chamar apos pausar DRM no thread principal).
+pub fn do_vt_switch(vt: u8) {
+    tracing::info!("P0 — ativando tty{vt}");
+
+    match Command::new("chvt").arg(vt.to_string()).status() {
+        Ok(status) if status.success() => {
+            tracing::info!("chvt {vt} ok");
+            return;
+        }
+        Ok(status) => tracing::warn!("chvt {vt} retornou {status}"),
+        Err(err) => tracing::warn!("chvt indisponivel: {err}"),
+    }
+
+    const VT_ACTIVATE: libc::c_ulong = 0x5606;
+    const VT_WAITACTIVE: libc::c_ulong = 0x5607;
+    const VT_RELDISP: libc::c_ulong = 0x5605;
+
+    if let Some(tty_path) = crate::env_detect::controlling_tty() {
+        if let Ok(ctrl) = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&tty_path)
+        {
+            use std::os::fd::AsRawFd;
+            let fd = ctrl.as_raw_fd();
+            unsafe {
+                libc::ioctl(fd, VT_RELDISP, 1i32);
+            }
+            tracing::info!("VT_RELDISP em {tty_path}");
+        }
+    }
+
+    if let Ok(tty0) = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/tty0")
+    {
+        use std::os::fd::AsRawFd;
+        let fd = tty0.as_raw_fd();
+        let ret = unsafe { libc::ioctl(fd, VT_ACTIVATE, vt as libc::c_ulong) };
+        if ret == 0 {
+            unsafe {
+                libc::ioctl(fd, VT_WAITACTIVE, vt as libc::c_ulong);
+            }
+            tracing::info!("ioctl VT_ACTIVATE/WAIT tty{vt} ok");
+            return;
+        }
+        tracing::warn!(
+            "ioctl VT_ACTIVATE falhou: {}",
+            std::io::Error::last_os_error()
+        );
+    }
+
+    if Command::new("openvt")
+        .args(["-s", "-w", &vt.to_string()])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+    {
+        tracing::info!("openvt {vt} ok");
+        return;
+    }
+
+}
+
+fn track_super_key(
+    state: &mut State,
+    keysym: &KeysymHandle<'_>,
+    key_state: smithay::backend::input::KeyState,
+) {
+    use smithay::backend::input::KeyState;
+
+    let is_super = keysym
+        .raw_syms()
+        .iter()
+        .any(|s| matches!(s.raw(), keysyms::KEY_Super_L | keysyms::KEY_Super_R));
+    if !is_super {
+        return;
+    }
+    match key_state {
+        KeyState::Pressed => state.local_super_keys = state.local_super_keys.saturating_add(1),
+        KeyState::Released => state.local_super_keys = state.local_super_keys.saturating_sub(1),
+    }
+}
+
+/// Filtro de teclado do compositor — roda ANTES de qualquer cliente Wayland (Konsole, etc.).
+pub fn compositor_keyboard_filter(
+    state: &mut State,
+    ctx: &EmergencyContext,
+    modifiers: &ModifiersState,
+    keysym: KeysymHandle<'_>,
+    key_state: smithay::backend::input::KeyState,
+    tty_vt: Option<&mut TtyVtControl<'_>>,
+) -> FilterResult<()> {
+    use smithay::backend::input::KeyState;
+
+    track_super_key(state, &keysym, key_state);
+
+    // Alt+F4 — fechar app em foco (padrão KDE/Plasma).
+    if key_state == KeyState::Pressed
+        && modifiers.alt
+        && !modifiers.ctrl
+        && !modifiers.logo
+        && !modifiers.shift
+        && keysym.modified_sym().raw() == keysyms::KEY_F4 as u32
+        && state.app_count() > 0
+    {
+        state.close_focused();
+        return FilterResult::Intercept(());
+    }
+
+    // P1 (e P0) sempre antes do filtro do painel e antes dos clientes Wayland.
+    if key_state == KeyState::Pressed {
+        if let Some(action) = match_combo(modifiers, &keysym) {
+            execute(action, ctx, state, tty_vt);
+            return FilterResult::Intercept(());
+        }
+    }
+
+    if state.alt_tab.open {
+        return crate::alt_tab::handlers::keyboard_filter(state, modifiers, &keysym, key_state);
+    }
+
+    if key_state == KeyState::Pressed
+        && modifiers.alt
+        && !modifiers.ctrl
+        && !modifiers.logo
+        && keysym.modified_sym().raw() == keysyms::KEY_Tab as u32
+        && state.app_count() > 1
+    {
+        crate::alt_tab::handlers::try_open(state, modifiers, &keysym, key_state);
+        return FilterResult::Intercept(());
+    }
+
+    if state.context_menu.open {
+        return crate::context_menu::handlers::keyboard_filter(state, modifiers, &keysym, key_state);
+    }
+
+    if state.overlay_open {
+        return overlay_panel_filter(state, modifiers, &keysym, key_state);
+    }
+
+    FilterResult::Forward
+}
+
+fn overlay_panel_filter(
+    state: &mut State,
+    modifiers: &ModifiersState,
+    keysym: &KeysymHandle<'_>,
+    key_state: smithay::backend::input::KeyState,
+) -> FilterResult<()> {
+    crate::settings::input::keyboard_filter(state, modifiers, keysym, key_state)
+}
+
+/// Evdev: mesma logica P0/P1 para quando o thread consegue ler hardware direto.
+pub fn match_evdev(
+    ctrl: bool,
+    alt: bool,
+    shift: bool,
+    meta: bool,
+    pressed: bool,
+    code: u16,
+) -> Option<EmergencyAction> {
+    if !pressed {
+        return None;
+    }
+    const KEY_ESC: u16 = 1;
+    const KEY_DELETE: u16 = 111;
+    const KEY_F1: u16 = 59;
+    const KEY_F12: u16 = 70;
+    if code == KEY_ESC && meta {
+        return Some(EmergencyAction::ToggleOverlay);
+    }
+    if !ctrl {
+        return None;
+    }
+    if shift && !alt && code == KEY_ESC {
+        return Some(EmergencyAction::ToggleOverlay);
+    }
+    if !alt {
+        return None;
+    }
+    if shift && code == KEY_DELETE {
+        return Some(EmergencyAction::ForceQuit);
+    }
+    if !shift && code == KEY_DELETE {
+        return Some(EmergencyAction::ToggleOverlay);
+    }
+    if !shift && (KEY_F1..=KEY_F12).contains(&code) {
+        return Some(EmergencyAction::SwitchVt((code - KEY_F1 + 1) as u8));
+    }
+    const KEY_1: u16 = 2;
+    const KEY_9: u16 = 10;
+    const KEY_0: u16 = 11;
+    if !shift && (KEY_1..=KEY_9).contains(&code) {
+        return Some(EmergencyAction::SwitchVt((code - KEY_1 + 1) as u8));
+    }
+    if !shift && code == KEY_0 {
+        return Some(EmergencyAction::SwitchVt(10));
+    }
+    None
+}
