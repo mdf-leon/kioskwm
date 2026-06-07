@@ -239,9 +239,8 @@ impl crate::state::State {
         let seat = self.seat.clone();
         let mods = keyboard.modifier_state();
         let enter_serial = self.next_serial();
-        keyboard.with_pressed_keysyms(|keys| {
-            KeyboardTarget::enter(surface, &seat, self, keys, enter_serial);
-        });
+        // Não reenviar teclas ainda pressionadas — duplica chars ao refocar (Enter/clique).
+        KeyboardTarget::enter(surface, &seat, self, Vec::new(), enter_serial);
         let mod_serial = self.next_serial();
         KeyboardTarget::modifiers(surface, &seat, self, mods, mod_serial);
     }
@@ -252,9 +251,7 @@ impl crate::state::State {
         let seat = self.seat.clone();
         let mods = keyboard.modifier_state();
         let enter_serial = self.next_serial();
-        keyboard.with_pressed_keysyms(|keys| {
-            KeyboardTarget::enter(x11_surface, &seat, self, keys, enter_serial);
-        });
+        KeyboardTarget::enter(x11_surface, &seat, self, Vec::new(), enter_serial);
         let mod_serial = self.next_serial();
         KeyboardTarget::modifiers(x11_surface, &seat, self, mods, mod_serial);
     }

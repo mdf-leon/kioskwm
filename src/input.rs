@@ -138,6 +138,9 @@ pub fn handle_input<B: InputBackend>(
                     )
                 },
             );
+            if !state.overlay_open && !state.context_menu.open && !state.alt_tab.open {
+                state.request_render();
+            }
         }
         InputEvent::PointerMotion { event } => {
             let wm_ui = state.overlay_open || state.context_menu.open || state.alt_tab.open;

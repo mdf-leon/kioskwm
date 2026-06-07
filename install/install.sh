@@ -145,7 +145,26 @@ download_and_verify() {
 verify_install() {
     command -v "$BIN_NAME" >/dev/null 2>&1 || die "instalação falhou: ${BIN_NAME} não está no PATH"
     log "versão instalada:"
-    "$BIN_NAME" --version
+    if ! "$BIN_NAME" --version; then
+        local err
+        err="$("$BIN_NAME" --version 2>&1)" || true
+        if [[ "$err" == *GLIBC_* ]]; then
+            cat >&2 <<EOF
+error: binário do release incompatível com a glibc deste sistema.
+  $err
+
+O release oficial é compilado para Ubuntu 22.04+ (glibc 2.35).
+Se você vê GLIBC_2.39, baixe um release mais recente ou compile no guest:
+
+  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+  source "\$HOME/.cargo/env"
+  git clone https://github.com/${REPO}.git && cd kioskwm && cargo build --release
+  sudo install -m755 target/release/kioskwm /usr/local/bin/kioskwm
+EOF
+            exit 1
+        fi
+        die "falha ao executar ${BIN_NAME}: $err"
+    fi
     log "pronto — rode: kioskwm --desktop   (aninhado) ou kioskwm   (TTY/kiosk)"
 }
 

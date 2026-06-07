@@ -84,15 +84,22 @@ fn kill_switch_thread(
     };
     let mut extended = false;
 
-    let tty = open_controlling_tty();
-    if let Some(ref t) = tty {
+    let input_devices = open_input_devices();
+    let use_tty_fallback = input_devices.is_empty();
+
+    let tty = if use_tty_fallback {
+        open_controlling_tty()
+    } else {
+        None
+    };
+    if let Some(ref t) = &tty {
         set_medium_raw(t.as_raw_fd());
     }
 
     loop {
         let mut fds: Vec<libc::pollfd> = Vec::new();
 
-        for dev in open_input_devices() {
+        for dev in &input_devices {
             fds.push(libc::pollfd {
                 fd: dev.as_raw_fd(),
                 events: libc::POLLIN,
@@ -100,12 +107,14 @@ fn kill_switch_thread(
             });
         }
         let tty_fd = tty.as_ref().map(|t| t.as_raw_fd());
-        if let Some(fd) = tty_fd {
-            fds.push(libc::pollfd {
-                fd,
-                events: libc::POLLIN,
-                revents: 0,
-            });
+        if use_tty_fallback {
+            if let Some(fd) = tty_fd {
+                fds.push(libc::pollfd {
+                    fd,
+                    events: libc::POLLIN,
+                    revents: 0,
+                });
+            }
         }
 
         if fds.is_empty() {
@@ -124,9 +133,12 @@ fn kill_switch_thread(
             continue;
         }
 
-        let evdev_count = fds.len().saturating_sub(if tty_fd.is_some() { 1 } else { 0 });
-        let devices = open_input_devices();
-        for (i, device) in devices.iter().enumerate() {
+        let evdev_count = fds.len().saturating_sub(if use_tty_fallback && tty_fd.is_some() {
+            1
+        } else {
+            0
+        });
+        for (i, device) in input_devices.iter().enumerate() {
             if fds[i].revents & libc::POLLIN == 0 {
                 continue;
             }
