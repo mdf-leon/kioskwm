@@ -9,7 +9,12 @@ use smithay::{
     utils::{Logical, Point},
 };
 
-use crate::{emergency::EmergencyContext, overlay::OverlayControl, state::State};
+use crate::{
+    emergency::EmergencyContext,
+    hardware_bridge::HardwareBridge,
+    overlay::OverlayControl,
+    state::State,
+};
 
 pub struct PointerTracker {
     pub pos: Point<f64, Logical>,
@@ -36,7 +41,7 @@ fn send_motion(
     location: Point<f64, Logical>,
     time: u32,
 ) {
-    if state.overlay_open {
+    if state.overlay_open || state.context_menu.open || state.alt_tab.open {
         return;
     }
     let serial = state.next_serial();
@@ -98,9 +103,13 @@ pub fn handle_input<B: InputBackend>(
     tracker: &mut PointerTracker,
     overlay: &OverlayControl,
     emergency: &EmergencyContext,
+    hardware: &HardwareBridge,
     event: InputEvent<B>,
+    tty_vt: Option<&mut crate::emergency::TtyVtControl<'_>>,
 ) {
     overlay.poll(state);
+    emergency.menu.poll(state);
+    hardware.set_pointer(tracker.pos.x, tracker.pos.y);
 
     let keyboard = state.keyboard.clone();
     let pointer = state.pointer.clone();
@@ -118,19 +127,23 @@ pub fn handle_input<B: InputBackend>(
                 event.time() as u32,
                 |data, mods, keysym| {
                     crate::emergency::compositor_keyboard_filter(
-                        data, emergency, mods, keysym, key_state,
+                        data, emergency, mods, keysym, key_state, tty_vt,
                     )
                 },
             );
         }
         InputEvent::PointerMotion { event } => {
-            let motion_scale = if state.overlay_open { 1.0 } else { speed };
+            let wm_ui = state.overlay_open || state.context_menu.open || state.alt_tab.open;
+            let motion_scale = if wm_ui { 1.0 } else { speed };
             tracker.pos.x += event.delta_x() * motion_scale;
             tracker.pos.y += event.delta_y() * motion_scale;
             tracker.clamp(state.output_size);
             state.pointer_pos = tracker.pos;
+            hardware.set_pointer(tracker.pos.x, tracker.pos.y);
             if state.overlay_open {
                 crate::settings::input::handle_pointer_motion(state, tracker.pos);
+            } else if state.context_menu.open {
+                crate::context_menu::handlers::handle_pointer_motion(state, tracker.pos);
             } else {
                 send_motion(state, &pointer, tracker.pos, event.time() as u32);
             }
@@ -140,15 +153,20 @@ pub fn handle_input<B: InputBackend>(
             tracker.pos = pos;
             tracker.clamp(state.output_size);
             state.pointer_pos = tracker.pos;
+            hardware.set_pointer(tracker.pos.x, tracker.pos.y);
             if state.overlay_open {
                 crate::settings::input::handle_pointer_motion(state, tracker.pos);
+            } else if state.context_menu.open {
+                crate::context_menu::handlers::handle_pointer_motion(state, tracker.pos);
             } else {
                 send_motion(state, &pointer, tracker.pos, event.time() as u32);
             }
         }
         InputEvent::PointerButton { event } => {
+            const BTN_LEFT: u32 = 0x110;
+            const BTN_RIGHT: u32 = 0x111;
+
             if state.overlay_open {
-                const BTN_LEFT: u32 = 0x110;
                 if event.button_code() == BTN_LEFT {
                     let pressed = event.state() == ButtonState::Pressed;
                     crate::settings::input::handle_pointer_button(
@@ -161,6 +179,33 @@ pub fn handle_input<B: InputBackend>(
                     }
                 }
                 return;
+            }
+
+            if state.context_menu.open {
+                if event.button_code() == BTN_LEFT {
+                    let pressed = event.state() == ButtonState::Pressed;
+                    if pressed {
+                        crate::context_menu::handlers::handle_pointer_button(
+                            state,
+                            tracker.pos,
+                            pressed,
+                        );
+                    }
+                }
+                return;
+            }
+
+            if event.button_code() == BTN_RIGHT
+                && event.state() == ButtonState::Pressed
+                && crate::context_menu::handlers::super_held(state)
+            {
+                crate::context_menu::handlers::open_at(state, tracker.pos);
+                return;
+            }
+            if state.focused_is_x11 && !state.x11_input_wanted {
+                let idx = state.focused_x11;
+                tracing::info!("Clique na app X11 — ativando input");
+                state.focus_x11(idx);
             }
             let time = event.time() as u32;
             tracing::debug!(
@@ -184,7 +229,7 @@ pub fn handle_input<B: InputBackend>(
             pointer.frame(state);
         }
         InputEvent::PointerAxis { event } => {
-            if state.overlay_open {
+            if state.overlay_open || state.context_menu.open || state.alt_tab.open {
                 return;
             }
             use smithay::backend::input::{Axis, AxisRelativeDirection};

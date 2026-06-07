@@ -1,10 +1,10 @@
 mod actions;
 mod icon;
 mod layout;
-mod raster;
+pub(crate) mod raster;
 mod render;
 mod slider;
-mod text;
+pub(crate) mod text;
 pub mod theme;
 
 pub mod input;

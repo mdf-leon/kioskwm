@@ -14,6 +14,7 @@ smithay = { version = "0.7.0", features = [
     "desktop",
     "renderer_gl",
     "use_system_lib",
+    "xwayland",
 ] }
 wayland-protocols = { version = "0.32", features = ["server", "client", "unstable"] }
 wayland-server = "0.31"

@@ -9,7 +9,7 @@ use wayland_backend::client::{Backend, ObjectId};
 use wayland_client::{
     globals::{registry_queue_init, GlobalListContents},
     protocol::{wl_registry, wl_seat, wl_surface},
-    Connection, Dispatch, Proxy, QueueHandle,
+    Connection, Dispatch, EventQueue, Proxy, QueueHandle,
 };
 use wayland_protocols::wp::keyboard_shortcuts_inhibit::zv1::client::{
     zwp_keyboard_shortcuts_inhibit_manager_v1::ZwpKeyboardShortcutsInhibitManagerV1,
@@ -83,7 +83,8 @@ impl Dispatch<ZwpKeyboardShortcutsInhibitorV1, ()> for ShortcutState {
 /// Mantém o pedido de inhibit ativo na conexão Wayland do compositor pai.
 pub struct ParentShortcutGuard {
     conn: Connection,
-    qh: QueueHandle<ShortcutState>,
+    state: ShortcutState,
+    event_queue: EventQueue<ShortcutState>,
     manager: ZwpKeyboardShortcutsInhibitManagerV1,
     seat: wl_seat::WlSeat,
     surface: wl_surface::WlSurface,
@@ -124,19 +125,39 @@ impl ParentShortcutGuard {
 
         let mut guard = Self {
             conn,
-            qh,
+            state: ShortcutState,
+            event_queue,
             manager,
             seat,
             surface,
             inhibitor: None,
         };
         guard.ensure_inhibited();
+        guard.poll();
         Some(guard)
     }
 
     pub fn on_focus(&mut self, focused: bool) {
         if focused {
             self.ensure_inhibited();
+            self.poll();
+        }
+    }
+
+    /// Drena eventos Wayland do compositor pai (necessário para o inhibit funcionar no KWin).
+    pub fn poll(&mut self) {
+        loop {
+            match self.event_queue.dispatch_pending(&mut self.state) {
+                Ok(0) => break,
+                Ok(_) => {}
+                Err(err) => {
+                    tracing::trace!("parent_shortcuts dispatch: {err}");
+                    break;
+                }
+            }
+        }
+        if self.conn.flush().is_err() {
+            tracing::trace!("parent_shortcuts flush falhou");
         }
     }
 }
@@ -148,10 +169,11 @@ impl ParentShortcutGuard {
             return;
         }
 
+        let qh = self.event_queue.handle();
         let inhibitor = self.manager.inhibit_shortcuts(
             &self.surface,
             &self.seat,
-            &self.qh,
+            &qh,
             (),
         );
         if self.conn.flush().is_err() {
@@ -195,8 +217,8 @@ pub fn log_workaround() {
     }
     if env_detect::is_kde_session() {
         tracing::info!(
-            "KDE/Plasma detectado — KWin pode engolir Ctrl+Alt+Del/Super+Esc; \
-             ativando inhibit Wayland + evdev"
+            "KDE/Plasma detectado — KWin pode engolir atalhos globais e Super; \
+             ativando keyboard_shortcuts_inhibit + evdev"
         );
     } else {
         tracing::info!(

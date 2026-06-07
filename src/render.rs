@@ -25,6 +25,11 @@ pub fn send_frame_callbacks(state: &mut State, time: u32) {
             send_frames_surface_tree(popup.wl_surface(), time);
         }
     }
+    for app in &state.x11_apps {
+        if let Some(wl) = app.surface.wl_surface() {
+            send_frames_surface_tree(&wl, time);
+        }
+    }
     state.maintain_popups();
 }
 
@@ -98,6 +103,7 @@ pub fn render_kiosk_frame(
     transform: Transform,
     pointer: Option<Point<f64, Logical>>,
     cursor: Option<&PointerCursor>,
+    time_ms: u32,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let damage = Rectangle::from_size(size);
 
@@ -105,38 +111,90 @@ pub fn render_kiosk_frame(
     let mut popup_elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> = Vec::new();
     let mut rendered_popups = std::collections::HashSet::new();
 
-    for surface in state.xdg_shell_state.toplevel_surfaces() {
+    let focused_wl = (!state.focused_is_x11).then(|| state.focused_app);
+    let focused_x11 = state.focused_is_x11.then(|| state.focused_x11);
+
+    // Apps não-focadas primeiro; focada (Wayland ou X11) sempre por cima.
+    for (idx, app) in state.running_apps.iter().enumerate() {
+        if focused_wl == Some(idx) {
+            continue;
+        }
         toplevel_elements.extend(render_elements_from_surface_tree(
             renderer,
-            surface.wl_surface(),
+            app.surface.wl_surface(),
             (0, 0),
             1.0,
             1.0,
             Kind::Unspecified,
         ));
+    }
+    for (idx, app) in state.x11_apps.iter().enumerate() {
+        if focused_x11 == Some(idx) {
+            continue;
+        }
+        let Some(wl) = app.surface.wl_surface() else {
+            continue;
+        };
+        let _ = import_surface_tree(renderer, &wl);
+        toplevel_elements.extend(render_elements_from_surface_tree(
+            renderer,
+            &wl,
+            (0, 0),
+            1.0,
+            1.0,
+            Kind::Unspecified,
+        ));
+    }
 
-        for (popup, popup_offset) in PopupManager::popups_for_surface(surface.wl_surface()) {
-            rendered_popups.insert(popup.wl_surface().id());
-            let wl = popup.wl_surface();
-            let (ox, oy) = state.popup_render_offset(&popup, popup_offset);
-            let _ = import_surface_tree(renderer, wl);
+    if let Some(idx) = focused_wl {
+        if let Some(app) = state.running_apps.get(idx) {
+            let surface = &app.surface;
+            toplevel_elements.extend(render_elements_from_surface_tree(
+                renderer,
+                surface.wl_surface(),
+                (0, 0),
+                1.0,
+                1.0,
+                Kind::Unspecified,
+            ));
 
-            let mut elems = render_popup_surface_tree(renderer, wl, (ox, oy), Scale::from(1.0));
-            if elems.is_empty() {
-                elems = render_elements_from_surface_tree(
+            for (popup, popup_offset) in PopupManager::popups_for_surface(surface.wl_surface()) {
+                rendered_popups.insert(popup.wl_surface().id());
+                let wl = popup.wl_surface();
+                let (ox, oy) = state.popup_render_offset(&popup, popup_offset);
+                let _ = import_surface_tree(renderer, wl);
+
+                let mut elems = render_popup_surface_tree(renderer, wl, (ox, oy), Scale::from(1.0));
+                if elems.is_empty() {
+                    elems = render_elements_from_surface_tree(
+                        renderer,
+                        wl,
+                        (ox, oy),
+                        1.0,
+                        1.0,
+                        Kind::Unspecified,
+                    );
+                }
+
+                if elems.is_empty() {
+                    tracing::trace!("popup aguardando buffer em ({ox}, {oy})");
+                }
+                popup_elements.extend(elems);
+            }
+        }
+    } else if let Some(idx) = focused_x11 {
+        if let Some(app) = state.x11_apps.get(idx) {
+            if let Some(wl) = app.surface.wl_surface() {
+                let _ = import_surface_tree(renderer, &wl);
+                toplevel_elements.extend(render_elements_from_surface_tree(
                     renderer,
-                    wl,
-                    (ox, oy),
+                    &wl,
+                    (0, 0),
                     1.0,
                     1.0,
                     Kind::Unspecified,
-                );
+                ));
             }
-
-            if elems.is_empty() {
-                tracing::trace!("popup aguardando buffer em ({ox}, {oy})");
-            }
-            popup_elements.extend(elems);
         }
     }
 
@@ -168,8 +226,20 @@ pub fn render_kiosk_frame(
     };
 
     let scale = state.output.current_scale().fractional_scale();
+    let context_menu = if state.context_menu.open {
+        crate::context_menu::prepare_menu(renderer, state, size, scale)?
+    } else {
+        None
+    };
+
     let settings_panel = if state.overlay_open {
         crate::settings::prepare_panel(renderer, state, size, scale)?
+    } else {
+        None
+    };
+
+    let alt_tab_overlay = if state.alt_tab.open {
+        crate::alt_tab::prepare_overlay(renderer, state, size, scale, time_ms)?
     } else {
         None
     };
@@ -177,6 +247,14 @@ pub fn render_kiosk_frame(
     let mut frame = renderer.render(target, size, transform)?;
     frame.clear(Color32F::new(0.08, 0.08, 0.08, 1.0), &[damage])?;
     draw_render_elements::<GlesRenderer, _, _>(&mut frame, 1.0, &elements, &[damage])?;
+
+    if let Some(overlay) = alt_tab_overlay {
+        draw_render_elements::<GlesRenderer, _, _>(&mut frame, 1.0, &[overlay.elem], &[damage])?;
+    }
+
+    if let Some(menu) = context_menu {
+        draw_render_elements::<GlesRenderer, _, _>(&mut frame, 1.0, &[menu.elem], &[damage])?;
+    }
 
     if let Some(panel) = settings_panel {
         draw_render_elements::<GlesRenderer, _, _>(&mut frame, 1.0, &[panel.elem], &[damage])?;

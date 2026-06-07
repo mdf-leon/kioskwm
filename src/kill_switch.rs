@@ -36,13 +36,20 @@ struct ScancodeMods {
     ctrl: bool,
     alt: bool,
     shift: bool,
+    meta: bool,
 }
 
-pub fn spawn(ctx: Arc<EmergencyContext>) {
+const BTN_RIGHT: u16 = 0x111;
+
+pub fn spawn(
+    ctx: Arc<EmergencyContext>,
+    mod_tracker: Arc<crate::modifiers::ModifierTracker>,
+    hardware: Arc<crate::hardware_bridge::HardwareBridge>,
+) {
     let nested = env_detect::parent_steals_global_shortcuts();
     thread::Builder::new()
         .name("kioskwm-kill".into())
-        .spawn(move || kill_switch_thread(ctx, nested))
+        .spawn(move || kill_switch_thread(ctx, mod_tracker, hardware, nested))
         .ok();
     if nested {
         tracing::info!(
@@ -57,7 +64,12 @@ pub fn spawn(ctx: Arc<EmergencyContext>) {
     }
 }
 
-fn kill_switch_thread(ctx: Arc<EmergencyContext>, nested: bool) {
+fn kill_switch_thread(
+    ctx: Arc<EmergencyContext>,
+    mod_tracker: Arc<crate::modifiers::ModifierTracker>,
+    hardware: Arc<crate::hardware_bridge::HardwareBridge>,
+    nested: bool,
+) {
     let mut evdev_mods = EvdevMods {
         ctrl: false,
         alt: false,
@@ -68,6 +80,7 @@ fn kill_switch_thread(ctx: Arc<EmergencyContext>, nested: bool) {
         ctrl: false,
         alt: false,
         shift: false,
+        meta: false,
     };
     let mut extended = false;
 
@@ -79,7 +92,7 @@ fn kill_switch_thread(ctx: Arc<EmergencyContext>, nested: bool) {
     loop {
         let mut fds: Vec<libc::pollfd> = Vec::new();
 
-        for dev in open_keyboard_devices() {
+        for dev in open_input_devices() {
             fds.push(libc::pollfd {
                 fd: dev.as_raw_fd(),
                 events: libc::POLLIN,
@@ -112,7 +125,7 @@ fn kill_switch_thread(ctx: Arc<EmergencyContext>, nested: bool) {
         }
 
         let evdev_count = fds.len().saturating_sub(if tty_fd.is_some() { 1 } else { 0 });
-        let devices = open_keyboard_devices();
+        let devices = open_input_devices();
         for (i, device) in devices.iter().enumerate() {
             if fds[i].revents & libc::POLLIN == 0 {
                 continue;
@@ -122,6 +135,14 @@ fn kill_switch_thread(ctx: Arc<EmergencyContext>, nested: bool) {
                     continue;
                 }
                 update_evdev_mods(&mut evdev_mods, ev.code, ev.value != 0);
+                mod_tracker.set_evdev_super(evdev_mods.meta);
+
+                if ev.code == BTN_RIGHT && ev.value == 1 && evdev_mods.meta {
+                    let (x, y) = hardware.pointer();
+                    ctx.menu.request_open(x, y);
+                    continue;
+                }
+
                 if let Some(action) = emergency::match_evdev(
                     evdev_mods.ctrl,
                     evdev_mods.alt,
@@ -152,7 +173,9 @@ fn kill_switch_thread(ctx: Arc<EmergencyContext>, nested: bool) {
                             extended = true;
                             continue;
                         }
-                        if let Some(action) = match_scancode(b, extended, &mut scan_mods) {
+                        if let Some(action) =
+                            match_scancode(b, extended, &mut scan_mods, &mod_tracker)
+                        {
                             dispatch_hardware(action, &ctx);
                         }
                         extended = false;
@@ -174,7 +197,8 @@ fn dispatch_hardware(action: EmergencyAction, ctx: &EmergencyContext) {
         }
         EmergencyAction::SwitchVt(vt) => {
             if emergency::try_p0_vt_debounce() {
-                ctx.request_vt_switch(vt);
+                tracing::info!("P0 — evdev troca imediata para tty{vt}");
+                emergency::do_vt_switch(vt);
             }
         }
     }
@@ -190,12 +214,21 @@ fn update_evdev_mods(mods: &mut EvdevMods, code: u16, pressed: bool) {
     }
 }
 
-fn match_scancode(byte: u8, extended: bool, mods: &mut ScancodeMods) -> Option<EmergencyAction> {
+fn match_scancode(
+    byte: u8,
+    extended: bool,
+    mods: &mut ScancodeMods,
+    mod_tracker: &crate::modifiers::ModifierTracker,
+) -> Option<EmergencyAction> {
     if byte & 0x80 != 0 {
         match byte & 0x7F {
             0x1D | 0x9D => mods.ctrl = false,
             0x38 | 0xB8 => mods.alt = false,
             0x2A | 0x36 => mods.shift = false,
+            0x5B | 0x5C if extended => {
+                mods.meta = false;
+                mod_tracker.set_evdev_super(false);
+            }
             _ => {}
         }
         return None;
@@ -213,7 +246,13 @@ fn match_scancode(byte: u8, extended: bool, mods: &mut ScancodeMods) -> Option<E
             mods.shift = true;
             None
         }
+        0x5B | 0x5C if extended => {
+            mods.meta = true;
+            mod_tracker.set_evdev_super(true);
+            None
+        }
         0x01 if mods.ctrl && mods.shift && !mods.alt => Some(EmergencyAction::ToggleOverlay),
+        0x01 if mods.meta => Some(EmergencyAction::ToggleOverlay),
         0x53 => {
             let _ = extended;
             if mods.ctrl && mods.alt && mods.shift {
@@ -227,11 +266,15 @@ fn match_scancode(byte: u8, extended: bool, mods: &mut ScancodeMods) -> Option<E
         0x3B..=0x44 if mods.ctrl && mods.alt && !mods.shift => {
             Some(EmergencyAction::SwitchVt((byte - 0x3B + 1) as u8))
         }
+        0x02..=0x0A if mods.ctrl && mods.alt && !mods.shift => {
+            Some(EmergencyAction::SwitchVt((byte - 0x02 + 1) as u8))
+        }
+        0x0B if mods.ctrl && mods.alt && !mods.shift => Some(EmergencyAction::SwitchVt(10)),
         _ => None,
     }
 }
 
-fn is_keyboard_device(event_name: &str) -> bool {
+fn is_input_device(event_name: &str) -> bool {
     let sysfs_ev = format!("/sys/class/input/{event_name}/device/capabilities/ev");
     let sysfs_key = format!("/sys/class/input/{event_name}/device/capabilities/key");
     let has_ev_key = std::fs::read_to_string(&sysfs_ev)
@@ -261,15 +304,15 @@ fn set_medium_raw(fd: i32) -> bool {
     unsafe { libc::ioctl(fd, KDSKBMODE, K_MEDIUMRAW) == 0 }
 }
 
-fn open_keyboard_devices() -> Vec<File> {
+fn open_input_devices() -> Vec<File> {
     let mut out = Vec::new();
-        let Ok(dir) = std::fs::read_dir("/dev/input") else {
+    let Ok(dir) = std::fs::read_dir("/dev/input") else {
         return out;
     };
     for entry in dir.flatten() {
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        if !name.starts_with("event") || !is_keyboard_device(&name) {
+        if !name.starts_with("event") || !is_input_device(&name) {
             continue;
         }
         if let Ok(f) = OpenOptions::new().read(true).open(entry.path()) {

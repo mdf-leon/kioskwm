@@ -12,7 +12,7 @@ use smithay::{
     utils::{Point, Rectangle, Size, Transform},
 };
 
-use crate::state::State;
+use crate::{i18n::{I18n, Msg}, state::State};
 
 use super::{
     icon,
@@ -85,14 +85,15 @@ fn rebuild_cache_if_needed(state: &mut State) -> Result<(), Box<dyn std::error::
     paint_chrome(&mut canvas);
 
     let hover = state.settings.hover;
+    let i18n = state.i18n;
 
     match state.settings.screen {
-        Screen::Main => paint_main(&mut canvas, hover),
-        Screen::Mouse => paint_mouse_static(&mut canvas, state.pointer_speed, hover),
+        Screen::Main => paint_main(&mut canvas, i18n, hover),
+        Screen::Mouse => paint_mouse_static(&mut canvas, i18n, state.pointer_speed, hover),
     }
 
     if let Some(confirm) = state.settings.confirm {
-        paint_confirm(&mut canvas, confirm, hover);
+        paint_confirm(&mut canvas, i18n, confirm, hover);
     }
 
     upload_pixels(state, &canvas, key);
@@ -161,7 +162,8 @@ fn cache_key(state: &State) -> u64 {
         0
     };
     let hover_id = state.settings.hover.map(hit_cache_id).unwrap_or(0);
-    screen | (confirm << 4) | (speed_q << 8) | (hover_id << 12)
+    let lang = state.i18n.cache_tag() as u64;
+    screen | (confirm << 4) | (speed_q << 8) | (hover_id << 12) | (lang << 16)
 }
 
 fn hit_cache_id(hit: Hit) -> u64 {
@@ -194,23 +196,23 @@ fn paint_header(c: &mut Canvas, title: &str, hover: Option<Hit>) {
     c.hline(0, theme::HEADER_H - 1, theme::PANEL_W, theme::BORDER);
 }
 
-fn paint_sub_header(c: &mut Canvas, title: &str, hover: Option<Hit>) {
+fn paint_sub_header(c: &mut Canvas, i18n: I18n, title: &str, hover: Option<Hit>) {
     let back = layout::MOUSE_BACK;
     if hover == Some(Hit::MouseBack) {
         c.fill_rounded_rect(back.x, back.y, back.w, back.h, 6, theme::BUTTON_HOVER);
     }
     icon::draw_back(c, 16, 15, 18);
-    text::draw(c, 38, 14, 12.0, "Voltar", theme::ACCENT);
+    text::draw(c, 38, 14, 12.0, i18n.t(Msg::Back), theme::ACCENT);
     let tw = text::width(title, 17.0, true);
     text::draw_bold(c, (theme::PANEL_W - tw) / 2, 10, 17.0, title, theme::TEXT);
     paint_close(c, hover);
     c.hline(0, theme::HEADER_H - 1, theme::PANEL_W, theme::BORDER);
 }
 
-fn paint_main(c: &mut Canvas, hover: Option<Hit>) {
-    paint_header(c, "Ajustes rapidos", hover);
+fn paint_main(c: &mut Canvas, i18n: I18n, hover: Option<Hit>) {
+    paint_header(c, i18n.t(Msg::Settings), hover);
 
-    text::draw(c, 20, theme::HEADER_H + 10, 11.0, "Paginas mais usadas", theme::TEXT_INACTIVE);
+    text::draw(c, 20, theme::HEADER_H + 10, 11.0, i18n.t(Msg::MostUsedPages), theme::TEXT_INACTIVE);
 
     let tile = layout::APPLET_MOUSE;
     let tile_bg = if hover == Some(Hit::AppletMouse) {
@@ -220,13 +222,17 @@ fn paint_main(c: &mut Canvas, hover: Option<Hit>) {
     };
     c.bordered_rounded_rect(tile.x, tile.y, tile.w, tile.h, 6, tile_bg, theme::BORDER);
     icon::draw_mouse(c, tile.x + 10, tile.y + 7, 22);
-    text::draw(c, tile.x + 40, tile.y + 9, 13.0, "Mouse", theme::TEXT);
+    text::draw(c, tile.x + 40, tile.y + 9, 13.0, i18n.t(Msg::Mouse), theme::TEXT);
 
     let footer_y = theme::PANEL_H - theme::FOOTER_H;
     c.hline(0, footer_y, theme::PANEL_W, theme::BORDER);
 
     let footers = layout::footer_buttons();
-    let labels = ["Fechar WM", "Desligar", "Reiniciar"];
+    let labels = [
+        i18n.t(Msg::FooterQuitWm),
+        i18n.t(Msg::FooterShutDown),
+        i18n.t(Msg::FooterRestart),
+    ];
     let hits = [Hit::FooterQuit, Hit::FooterShutdown, Hit::FooterReboot];
     for (i, rect) in footers.iter().enumerate() {
         let destructive = i > 0;
@@ -260,10 +266,10 @@ fn footer_button_style(hover: Option<Hit>, hit: Hit, destructive: bool) -> (Rgba
     }
 }
 
-fn paint_mouse_static(c: &mut Canvas, speed: f64, hover: Option<Hit>) {
-    paint_sub_header(c, "Mouse", hover);
+fn paint_mouse_static(c: &mut Canvas, i18n: I18n, speed: f64, hover: Option<Hit>) {
+    paint_sub_header(c, i18n, i18n.t(Msg::Mouse), hover);
 
-    text::draw(c, 32, 72, 13.0, "Velocidade do ponteiro", theme::TEXT);
+    text::draw(c, 32, 72, 13.0, i18n.t(Msg::PointerSpeed), theme::TEXT);
 
     let track = layout::mouse_slider();
     c.fill_rounded_rect(track.x, track.y, track.w, track.h, 2, theme::SLIDER_TRACK);
@@ -313,22 +319,18 @@ fn paint_mouse_static(c: &mut Canvas, speed: f64, hover: Option<Hit>) {
         20,
         footer_y + 12,
         10.0,
-        "Arraste o controle. Esc ou Voltar: menu principal.",
+        i18n.t(Msg::MouseFooterHint),
         theme::TEXT_INACTIVE,
     );
 }
 
-fn paint_confirm(c: &mut Canvas, action: ConfirmAction, hover: Option<Hit>) {
+fn paint_confirm(c: &mut Canvas, i18n: I18n, action: ConfirmAction, hover: Option<Hit>) {
     c.fill_rect(0, 0, theme::PANEL_W, theme::PANEL_H, theme::MODAL_SCRIM);
 
     let modal = layout::confirm_modal();
     c.bordered_rounded_rect(modal.x, modal.y, modal.w, modal.h, 6, theme::MODAL_BG, theme::BORDER);
 
-    let (title, body) = match action {
-        ConfirmAction::QuitWm => ("Fechar kioskwm?", "O compositor Wayland sera encerrado."),
-        ConfirmAction::Shutdown => ("Desligar o computador?", "Todos os programas serao fechados."),
-        ConfirmAction::Reboot => ("Reiniciar o computador?", "Todos os programas serao fechados."),
-    };
+    let (title, body) = i18n.confirm_dialog(action);
 
     text::draw_bold(c, modal.x + 20, modal.y + 24, 15.0, title, theme::TEXT);
     text::draw(c, modal.x + 20, modal.y + 52, 11.5, body, theme::TEXT_INACTIVE);
@@ -336,10 +338,10 @@ fn paint_confirm(c: &mut Canvas, action: ConfirmAction, hover: Option<Hit>) {
     let (cancel, ok) = layout::confirm_buttons(modal);
     let (cfill, cborder) = footer_button_style(hover, Hit::ConfirmCancel, false);
     c.bordered_rounded_rect(cancel.x, cancel.y, cancel.w, cancel.h, 4, cfill, cborder);
-    text::draw(c, cancel.x + 22, cancel.y + 7, 11.5, "Cancelar", theme::TEXT);
+    text::draw(c, cancel.x + 22, cancel.y + 7, 11.5, i18n.t(Msg::Cancel), theme::TEXT);
     let (ofill, oborder) = footer_button_style(hover, Hit::ConfirmOk, true);
     c.bordered_rounded_rect(ok.x, ok.y, ok.w, ok.h, 4, ofill, oborder);
-    text::draw(c, ok.x + 16, ok.y + 7, 11.5, "Confirmar", theme::TEXT);
+    text::draw(c, ok.x + 16, ok.y + 7, 11.5, i18n.t(Msg::Confirm), theme::TEXT);
 }
 
 pub fn invalidate_cache(state: &mut State) {

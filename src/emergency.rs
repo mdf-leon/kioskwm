@@ -6,15 +6,18 @@ use std::{
     process::Command,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
-        Arc, Mutex,
+        Arc,
     },
 };
 
-use calloop::channel::Sender;
-use smithay::input::keyboard::{FilterResult, KeysymHandle, ModifiersState};
+use smithay::{
+    backend::session::Session,
+    input::keyboard::{FilterResult, KeysymHandle, ModifiersState},
+};
 use xkbcommon::xkb::keysyms;
 
 use crate::{
+    context_menu::ContextMenuControl,
     overlay::OverlayControl,
     state::{request_exit, State},
 };
@@ -56,31 +59,16 @@ fn debounce_ms(slot: &AtomicU64, window_ms: u64) -> bool {
 pub struct EmergencyContext {
     pub exit_flag: Arc<AtomicBool>,
     pub overlay: Arc<OverlayControl>,
-    vt_sender: Mutex<Option<Sender<u8>>>,
+    pub menu: Arc<ContextMenuControl>,
 }
 
 impl EmergencyContext {
-    pub fn new(exit_flag: Arc<AtomicBool>, overlay: Arc<OverlayControl>) -> Self {
+    pub fn new(exit_flag: Arc<AtomicBool>, overlay: Arc<OverlayControl>, menu: Arc<ContextMenuControl>) -> Self {
         Self {
             exit_flag,
             overlay,
-            vt_sender: Mutex::new(None),
+            menu,
         }
-    }
-
-    pub fn set_vt_sender(&self, tx: Sender<u8>) {
-        *self.vt_sender.lock().unwrap() = Some(tx);
-    }
-
-    pub fn request_vt_switch(&self, vt: u8) {
-        if let Some(tx) = self.vt_sender.lock().unwrap().as_ref() {
-            if tx.send(vt).is_ok() {
-                tracing::info!("P0 — pedido de troca para tty{vt} (main loop)");
-                return;
-            }
-            tracing::warn!("canal VT cheio — tentando chvt direto");
-        }
-        do_vt_switch(vt);
     }
 }
 
@@ -108,7 +96,19 @@ pub fn match_combo(modifiers: &ModifiersState, keysym: &KeysymHandle<'_>) -> Opt
     if is_delete(sym) {
         return Some(EmergencyAction::ToggleOverlay);
     }
-    vt_from_keysym(sym).map(EmergencyAction::SwitchVt)
+    vt_from_keysym_handle(keysym).map(EmergencyAction::SwitchVt)
+}
+
+fn vt_from_keysym_handle(keysym: &KeysymHandle<'_>) -> Option<u8> {
+    if let Some(vt) = vt_from_keysym(keysym.modified_sym().raw()) {
+        return Some(vt);
+    }
+    for sym in keysym.raw_syms() {
+        if let Some(vt) = vt_from_keysym(sym.raw()) {
+            return Some(vt);
+        }
+    }
+    None
 }
 
 fn is_escape(sym: u32) -> bool {
@@ -160,7 +160,12 @@ pub fn seize_for_overlay(state: &mut State) {
     tracing::info!("Painel P1: input dos clientes bloqueado");
 }
 
-pub fn execute(action: EmergencyAction, ctx: &EmergencyContext, state: &mut State) {
+pub fn execute(
+    action: EmergencyAction,
+    ctx: &EmergencyContext,
+    state: &mut State,
+    tty_vt: Option<&mut TtyVtControl<'_>>,
+) {
     match action {
         EmergencyAction::ForceQuit => force_quit(&ctx.exit_flag),
         EmergencyAction::ToggleOverlay => {
@@ -170,7 +175,8 @@ pub fn execute(action: EmergencyAction, ctx: &EmergencyContext, state: &mut Stat
         }
         EmergencyAction::SwitchVt(vt) => {
             if try_p0_vt_debounce() {
-                ctx.request_vt_switch(vt);
+                tracing::info!("P0 — troca imediata para tty{vt}");
+                perform_vt_switch(vt, tty_vt);
             }
         }
     }
@@ -189,9 +195,41 @@ pub fn force_quit(exit_flag: &AtomicBool) {
     }
 }
 
+pub struct TtyVtControl<'a> {
+    pub libinput: &'a mut smithay::reexports::input::Libinput,
+    pub device: &'a mut smithay::backend::drm::DrmDevice,
+    pub session: &'a mut smithay::backend::session::libseat::LibSeatSession,
+}
+
+/// Pausa DRM/libinput e troca de VT (TTY). No desktop aninhado só chvt.
+pub fn perform_vt_switch(vt: u8, tty: Option<&mut TtyVtControl<'_>>) {
+    if let Some(ctx) = tty {
+        tracing::info!("P0 — pausando DRM/libinput antes de tty{vt}");
+        ctx.libinput.suspend();
+        let _ = ctx.device.pause();
+        do_vt_switch(vt);
+        match ctx.session.change_vt(vt as i32) {
+            Ok(()) => tracing::info!("libseat change_vt({vt}) ok"),
+            Err(err) => tracing::warn!("libseat change_vt({vt}): {err}"),
+        }
+    } else {
+        do_vt_switch(vt);
+    }
+}
+
 /// Troca de VT no kernel (chamar apos pausar DRM no thread principal).
 pub fn do_vt_switch(vt: u8) {
     tracing::info!("P0 — ativando tty{vt}");
+
+    match Command::new("chvt").arg(vt.to_string()).status() {
+        Ok(status) if status.success() => {
+            tracing::info!("chvt {vt} ok");
+            return;
+        }
+        Ok(status) => tracing::warn!("chvt {vt} retornou {status}"),
+        Err(err) => tracing::warn!("chvt indisponivel: {err}"),
+    }
+
     const VT_ACTIVATE: libc::c_ulong = 0x5606;
     const VT_WAITACTIVE: libc::c_ulong = 0x5607;
     const VT_RELDISP: libc::c_ulong = 0x5605;
@@ -242,10 +280,25 @@ pub fn do_vt_switch(vt: u8) {
         return;
     }
 
-    match Command::new("chvt").arg(vt.to_string()).status() {
-        Ok(status) if status.success() => tracing::info!("chvt {vt} ok"),
-        Ok(status) => tracing::warn!("chvt {vt} retornou {status}"),
-        Err(err) => tracing::warn!("chvt indisponivel: {err}"),
+}
+
+fn track_super_key(
+    state: &mut State,
+    keysym: &KeysymHandle<'_>,
+    key_state: smithay::backend::input::KeyState,
+) {
+    use smithay::backend::input::KeyState;
+
+    let is_super = keysym
+        .raw_syms()
+        .iter()
+        .any(|s| matches!(s.raw(), keysyms::KEY_Super_L | keysyms::KEY_Super_R));
+    if !is_super {
+        return;
+    }
+    match key_state {
+        KeyState::Pressed => state.local_super_keys = state.local_super_keys.saturating_add(1),
+        KeyState::Released => state.local_super_keys = state.local_super_keys.saturating_sub(1),
     }
 }
 
@@ -256,15 +309,50 @@ pub fn compositor_keyboard_filter(
     modifiers: &ModifiersState,
     keysym: KeysymHandle<'_>,
     key_state: smithay::backend::input::KeyState,
+    tty_vt: Option<&mut TtyVtControl<'_>>,
 ) -> FilterResult<()> {
     use smithay::backend::input::KeyState;
+
+    track_super_key(state, &keysym, key_state);
+
+    // Alt+F4 — fechar app em foco (padrão KDE/Plasma).
+    if key_state == KeyState::Pressed
+        && modifiers.alt
+        && !modifiers.ctrl
+        && !modifiers.logo
+        && !modifiers.shift
+        && keysym.modified_sym().raw() == keysyms::KEY_F4 as u32
+        && state.app_count() > 0
+    {
+        state.close_focused();
+        return FilterResult::Intercept(());
+    }
 
     // P1 (e P0) sempre antes do filtro do painel e antes dos clientes Wayland.
     if key_state == KeyState::Pressed {
         if let Some(action) = match_combo(modifiers, &keysym) {
-            execute(action, ctx, state);
+            execute(action, ctx, state, tty_vt);
             return FilterResult::Intercept(());
         }
+    }
+
+    if state.alt_tab.open {
+        return crate::alt_tab::handlers::keyboard_filter(state, modifiers, &keysym, key_state);
+    }
+
+    if key_state == KeyState::Pressed
+        && modifiers.alt
+        && !modifiers.ctrl
+        && !modifiers.logo
+        && keysym.modified_sym().raw() == keysyms::KEY_Tab as u32
+        && state.app_count() > 1
+    {
+        crate::alt_tab::handlers::try_open(state, modifiers, &keysym, key_state);
+        return FilterResult::Intercept(());
+    }
+
+    if state.context_menu.open {
+        return crate::context_menu::handlers::keyboard_filter(state, modifiers, &keysym, key_state);
     }
 
     if state.overlay_open {

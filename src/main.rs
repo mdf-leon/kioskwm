@@ -1,5 +1,12 @@
+mod alt_tab;
+mod apps;
+mod context_menu;
 mod cursor;
 mod emergency;
+mod hardware_bridge;
+mod hardware_poll;
+mod i18n;
+mod modifiers;
 mod env_detect;
 mod font8x8;
 mod input;
@@ -12,26 +19,31 @@ mod spawn;
 mod state;
 mod tty;
 mod winit_backend;
+mod x11;
 
 use clap::Parser;
 use tracing_subscriber::fmt::writer::MakeWriterExt;
 
 #[derive(Parser, Debug)]
-#[command(author, version, about = "Kiosk WM — compositor Wayland para kiosk ou teste no desktop")]
+#[command(author, version, about = "Kiosk WM — Wayland compositor for kiosk or nested desktop testing")]
 pub struct Args {
-    /// Terminal a abrir: nome, "auto", ou via env KIOSKWM_TERMINAL / TERMINAL
+    /// Terminal to launch: name, "auto", or via KIOSKWM_TERMINAL / TERMINAL
     #[arg(short, long, default_value = "auto")]
     terminal: String,
 
-    /// Não abre terminal automaticamente (útil para testar manualmente)
+    /// UI language code (en, pt). Overrides KIOSKWM_LANG and LANG.
+    #[arg(long)]
+    lang: Option<String>,
+
+    /// Do not spawn a terminal automatically
     #[arg(long)]
     no_spawn: bool,
 
-    /// Atraso em ms antes de abrir o terminal (espera o socket ficar pronto)
+    /// Delay in ms before spawning the terminal (wait for the socket)
     #[arg(long, default_value_t = 300)]
     spawn_delay_ms: u64,
 
-    /// Força modo desktop (winit aninhado no Plasma/Konsole)
+    /// Force nested desktop mode (winit inside Plasma/Konsole)
     #[arg(long)]
     desktop: bool,
 }
@@ -52,18 +64,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     let args = Args::parse();
+    let i18n = i18n::I18n::resolve(args.lang.as_deref());
+    tracing::info!("UI language: {:?}", i18n.lang());
 
     tracing::info!("{}", env_detect::detection_debug());
 
     if args.desktop {
         tracing::info!("Modo desktop (winit) — forçado via --desktop");
-        winit_backend::run(args)
+        winit_backend::run(args, i18n)
     } else if env_detect::on_hardware_tty() {
         let tty = env_detect::controlling_tty().unwrap_or_default();
         tracing::info!("VT {tty} — modo TTY (DRM + libseat)");
-        tty::run(args)
+        tty::run(args, i18n)
     } else {
         tracing::info!("Terminal gráfico — modo desktop (winit)");
-        winit_backend::run(args)
+        winit_backend::run(args, i18n)
     }
 }

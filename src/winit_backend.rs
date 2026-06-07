@@ -8,21 +8,24 @@ use smithay::{
     reexports::wayland_server::Display,
     utils::{Rectangle, Transform},
 };
-use wayland_server::ListeningSocket;
-
 use crate::{
     input::{debug_right_click, handle_input, PointerTracker},
+    context_menu::ContextMenuControl,
     emergency::EmergencyContext,
+    hardware_bridge::HardwareBridge,
     kill_switch,
     overlay::OverlayControl,
     parent_shortcuts::ParentShortcutGuard,
     render::{render_kiosk_frame, send_frame_callbacks},
-    spawn::{command_exists, resolve_terminal, schedule_spawn},
+    spawn::{
+        bind_wayland_socket, command_exists, log_bound_socket, prepare_runtime_files,
+        resolve_terminal, schedule_spawn,
+    },
     state::{accept_clients, accept_clients_rounds, init_state, new_exit_flag, should_exit, State},
 };
-use crate::Args;
+use crate::{env_detect, i18n::I18n, Args};
 
-pub fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
+pub fn run(args: Args, i18n: I18n) -> Result<(), Box<dyn std::error::Error>> {
     ensure_desktop_env()?;
 
     let terminal = resolve_terminal(&args.terminal);
@@ -41,6 +44,7 @@ pub fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     let (mut backend, mut winit) = winit::init::<GlesRenderer>()?;
     let physical_size = backend.window_size();
 
+    let mod_tracker = crate::modifiers::ModifierTracker::new_arc();
     let mut state = init_state(
         &dh,
         "kioskwm",
@@ -48,10 +52,17 @@ pub fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         physical_size,
         (480, 270),
         new_exit_flag(),
+        i18n,
+        mod_tracker.clone(),
     )?;
     state.register_dmabuf_formats(backend.renderer().dmabuf_formats());
+    state.output_transform = Transform::Flipped180;
 
-    let listener = ListeningSocket::bind_auto("kioskwm", 0..32)?;
+    let mut event_loop = crate::x11::make_event_loop();
+    let loop_handle = event_loop.handle();
+    crate::x11::start(&loop_handle, &dh);
+
+    let listener = bind_wayland_socket()?;
     let socket_name = listener
         .socket_name()
         .expect("socket wayland sem nome")
@@ -63,7 +74,8 @@ pub fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         std::env::var_os("WAYLAND_DISPLAY"),
         std::env::var_os("DISPLAY")
     );
-    tracing::info!("Socket Wayland do kioskwm: {}", socket_name);
+    log_bound_socket(&socket_name);
+    prepare_runtime_files(&socket_name);
 
     if !args.no_spawn {
         schedule_spawn(terminal, socket_name.clone(), args.spawn_delay_ms);
@@ -78,13 +90,19 @@ pub fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     crate::parent_shortcuts::log_workaround();
 
     let overlay = OverlayControl::new();
+    let menu = ContextMenuControl::new();
+    let hardware = HardwareBridge::new_arc();
     let emergency = std::sync::Arc::new(EmergencyContext::new(
         state.exit_requested.clone(),
         overlay.clone(),
+        menu,
     ));
-    kill_switch::spawn(emergency.clone());
+    kill_switch::spawn(emergency.clone(), mod_tracker, hardware.clone());
 
     let mut shortcut_guard = ParentShortcutGuard::try_new(backend.window());
+    if env_detect::parent_steals_global_shortcuts() {
+        backend.window().focus_window();
+    }
 
     let start_time = Instant::now();
     let mut pointer_tracker = PointerTracker::new(state.output_size);
@@ -103,19 +121,30 @@ pub fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                     guard.on_focus(focused);
                 }
             }
+            WinitEvent::CloseRequested => {
+                tracing::info!("Fechar janela solicitado (X / menu KDE)");
+                state.handle_close_request();
+            }
             WinitEvent::Input(event) => {
                 handle_input(
                     &mut state,
                     &mut pointer_tracker,
                     &overlay,
                     &emergency,
+                    &hardware,
                     event,
+                    None,
                 )
             }
             _ => {}
         });
 
         overlay.poll(&mut state);
+        emergency.menu.poll(&mut state);
+
+        if let Some(guard) = shortcut_guard.as_mut() {
+            guard.poll();
+        }
 
         if matches!(status, ::winit::platform::pump_events::PumpStatus::Exit(_))
             || should_exit(&state.exit_requested)
@@ -128,6 +157,7 @@ pub fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
 
         {
             accept_clients(&mut display, &mut state, &listener)?;
+            crate::x11::dispatch(&mut event_loop, &mut state);
 
             let (renderer, mut framebuffer) = backend.bind()?;
             render_kiosk_frame(
@@ -138,6 +168,7 @@ pub fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                 Transform::Flipped180,
                 Some(pointer_tracker.pos),
                 None,
+                start_time.elapsed().as_millis() as u32,
             )?;
 
             send_frame_callbacks(
@@ -153,7 +184,7 @@ pub fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         frame_count += 1;
         if auto_rclick
             && !auto_rclick_done
-            && state.primary_toplevel.is_some()
+            && !state.running_apps.is_empty()
             && frame_count > 120
         {
             debug_right_click(&mut state, &mut pointer_tracker);

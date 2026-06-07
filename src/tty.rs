@@ -1,10 +1,9 @@
 use std::{
     path::Path,
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use calloop::{
-    channel::{channel, Event as ChannelEvent},
     signals::{Signal, Signals},
     timer::{TimeoutAction, Timer},
     EventLoop, LoopHandle, LoopSignal,
@@ -22,7 +21,7 @@ use smithay::{
         renderer::{gles::GlesRenderer, Bind, ImportDma},
         session::{
             libseat::LibSeatSession,
-            Event as SessionEvent, Session,
+            Event as SessionEvent, Session as LibSeatSessionTrait,
         },
         udev::primary_gpu,
     },
@@ -34,19 +33,24 @@ use smithay::{
     },
     utils::{DeviceFd, Rectangle, Transform},
 };
-use wayland_server::ListeningSocket;
 
 use crate::{
     cursor::PointerCursor,
     input::{handle_input, PointerTracker},
+    context_menu::ContextMenuControl,
     emergency::EmergencyContext,
+    hardware_bridge::HardwareBridge,
     kill_switch,
     overlay::OverlayControl,
     render::{render_kiosk_frame, send_frame_callbacks},
-    spawn::{command_exists, resolve_terminal, schedule_spawn},
+    spawn::{
+        bind_wayland_socket, command_exists, log_bound_socket, prepare_runtime_files,
+        resolve_terminal, schedule_spawn,
+    },
     state::{accept_clients, accept_clients_rounds, init_state, new_exit_flag, should_exit, State},
 };
 use crate::Args;
+use wayland_server::ListeningSocket;
 
 const COLOR_FORMATS: &[Fourcc] = &[Fourcc::Abgr8888, Fourcc::Argb8888];
 
@@ -60,16 +64,19 @@ struct OutputConfig {
 
 struct TtyLoop {
     state: State,
+    x11_loop: smithay::reexports::calloop::EventLoop<'static, State>,
     display: Display<State>,
     listener: ListeningSocket,
     device: DrmDevice,
     gbm_surface: GbmBufferedSurface<GbmAllocator<DrmDeviceFd>, ()>,
     renderer: GlesRenderer,
     libinput: Libinput,
+    session: LibSeatSession,
     pointer_tracker: PointerTracker,
     pointer_cursor: PointerCursor,
     overlay: std::sync::Arc<OverlayControl>,
     emergency: std::sync::Arc<EmergencyContext>,
+    hardware: std::sync::Arc<HardwareBridge>,
     loop_signal: LoopSignal,
     start_time: Instant,
 }
@@ -142,6 +149,8 @@ fn request_render(handle: &LoopHandle<'_, TtyLoop>) {
 
 impl TtyLoop {
     fn render_frame(&mut self) {
+        self.emergency.menu.poll(&mut self.state);
+
         if !self.device.is_active() {
             return;
         }
@@ -164,6 +173,7 @@ impl TtyLoop {
         if let Err(err) = accept_clients(&mut self.display, &mut self.state, &self.listener) {
             tracing::warn!("wayland dispatch: {}", err);
         }
+        crate::x11::dispatch(&mut self.x11_loop, &mut self.state);
 
         let render_result = (|| -> Result<(), Box<dyn std::error::Error>> {
             let mut target = self.renderer.bind(&mut dmabuf)?;
@@ -175,6 +185,7 @@ impl TtyLoop {
                 Transform::Normal,
                 Some(self.pointer_tracker.pos),
                 Some(&self.pointer_cursor),
+                self.start_time.elapsed().as_millis() as u32,
             )?;
             drop(target);
             Ok(())
@@ -212,7 +223,7 @@ impl TtyLoop {
     }
 }
 
-pub fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
+pub fn run(args: Args, i18n: crate::i18n::I18n) -> Result<(), Box<dyn std::error::Error>> {
     ensure_tty_env()?;
 
     let terminal = resolve_terminal(&args.terminal);
@@ -267,6 +278,7 @@ pub fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     let display: Display<State> = Display::new()?;
     let dh = display.handle();
     let exit_requested = new_exit_flag();
+    let mod_tracker = crate::modifiers::ModifierTracker::new_arc();
     let mut state = init_state(
         &dh,
         "kioskwm",
@@ -274,31 +286,41 @@ pub fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         output.physical_size,
         output.monitor_mm,
         exit_requested,
+        i18n,
+        mod_tracker.clone(),
     )?;
     state.register_dmabuf_formats(renderer_formats.clone());
 
-    let listener = ListeningSocket::bind_auto("kioskwm", 0..32)?;
+    let mut x11_loop = crate::x11::make_event_loop();
+    crate::x11::start(&x11_loop.handle(), &dh);
+
+    let listener = bind_wayland_socket()?;
     let socket_name = listener
         .socket_name()
         .expect("socket wayland sem nome")
         .to_string_lossy()
         .into_owned();
 
-    tracing::info!("Socket Wayland do kioskwm: {}", socket_name);
+    log_bound_socket(&socket_name);
+    prepare_runtime_files(&socket_name);
 
     let overlay = OverlayControl::with_loop_wake(true);
+    let menu = ContextMenuControl::with_loop_wake(true);
+    let hardware = HardwareBridge::new_arc();
     let emergency = std::sync::Arc::new(EmergencyContext::new(
         state.exit_requested.clone(),
         overlay.clone(),
+        menu,
     ));
-    kill_switch::spawn(emergency.clone());
+    kill_switch::spawn(emergency.clone(), mod_tracker, hardware.clone());
 
     if !args.no_spawn {
         schedule_spawn(terminal, socket_name, args.spawn_delay_ms);
     }
 
+    let session_for_loop = session.clone();
     let mut libinput =
-        Libinput::new_with_udev::<LibinputSessionInterface<LibSeatSession>>(session.clone().into());
+        Libinput::new_with_udev::<LibinputSessionInterface<LibSeatSession>>(session.into());
     libinput
         .udev_assign_seat(&seat_name)
         .map_err(|()| "falha ao associar libinput ao seat")?;
@@ -308,33 +330,24 @@ pub fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     let handle = event_loop.handle();
     let loop_signal = event_loop.get_signal();
 
-    let (vt_tx, vt_rx) = channel::<u8>();
-    emergency.set_vt_sender(vt_tx);
-
     let mut data = TtyLoop {
         pointer_tracker: PointerTracker::new(state.output_size),
         pointer_cursor: PointerCursor::load(),
         loop_signal: loop_signal.clone(),
         overlay,
         emergency,
+        hardware,
         state,
+        x11_loop,
         display,
         listener,
         device,
         gbm_surface,
         renderer,
         libinput,
+        session: session_for_loop,
         start_time: Instant::now(),
     };
-
-    handle.insert_source(vt_rx, move |event, _, data| {
-        if let ChannelEvent::Msg(vt) = event {
-            tracing::info!("P0 — preparando troca para tty{vt} (pause DRM)");
-            data.libinput.suspend();
-            data.device.pause();
-            crate::emergency::do_vt_switch(vt);
-        }
-    })?;
 
     let signal_handle = handle.clone();
     handle.insert_source(
@@ -344,6 +357,7 @@ pub fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             move |event, _, data| {
                 if event.signal() == Signal::SIGUSR2 {
                     data.overlay.poll(&mut data.state);
+                    data.emergency.menu.poll(&mut data.state);
                     request_render(&signal_handle);
                 } else {
                     tracing::info!("Sinal {:?} — fechando compositor", event.signal());
@@ -357,12 +371,19 @@ pub fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     handle.insert_source(libinput_backend, {
         let handle = handle.clone();
         move |event, _, data| {
+            let mut tty_vt = crate::emergency::TtyVtControl {
+                libinput: &mut data.libinput,
+                device: &mut data.device,
+                session: &mut data.session,
+            };
             handle_input(
                 &mut data.state,
                 &mut data.pointer_tracker,
                 &data.overlay,
                 &data.emergency,
+                &data.hardware,
                 event,
+                Some(&mut tty_vt),
             );
             request_render(&handle);
         }
