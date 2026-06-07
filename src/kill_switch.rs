@@ -43,7 +43,7 @@ pub fn spawn(ctx: Arc<EmergencyContext>) {
         .spawn(move || kill_switch_thread(ctx))
         .ok();
     tracing::info!(
-        "Fallback hardware: Ctrl+Alt+Shift+Del=P0 encerra; Ctrl+Alt+Del=P1 painel; Ctrl+Alt+F1-F12=VT"
+        "Fallback hardware: P0=Shift+Del sai, F1-F12/0-9 troca VT; P1=Del painel"
     );
 }
 
@@ -145,8 +145,16 @@ fn kill_switch_thread(ctx: Arc<EmergencyContext>) {
 fn dispatch_hardware(action: EmergencyAction, ctx: &EmergencyContext) {
     match action {
         EmergencyAction::ForceQuit => emergency::force_quit(&ctx.exit_flag),
-        EmergencyAction::ToggleOverlay => ctx.overlay.request_toggle(),
-        EmergencyAction::SwitchVt(vt) => emergency::switch_vt(vt),
+        EmergencyAction::ToggleOverlay => {
+            if emergency::try_p1_debounce() {
+                ctx.overlay.request_toggle();
+            }
+        }
+        EmergencyAction::SwitchVt(vt) => {
+            if emergency::try_p0_vt_debounce() {
+                ctx.request_vt_switch(vt);
+            }
+        }
     }
 }
 

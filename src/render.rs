@@ -167,25 +167,19 @@ pub fn render_kiosk_frame(
         _ => None,
     };
 
-    let overlay = crate::overlay::prepare_overlay(renderer, state, size)?;
-    let scale = state.output.current_scale().fractional_scale();
-
     let mut frame = renderer.render(target, size, transform)?;
     frame.clear(Color32F::new(0.08, 0.08, 0.08, 1.0), &[damage])?;
     draw_render_elements::<GlesRenderer, _, _>(&mut frame, 1.0, &elements, &[damage])?;
 
-    if let Some(elem) = cursor_elem {
-        draw_render_elements::<GlesRenderer, _, _>(&mut frame, 1.0, &[elem], &[damage])?;
+    // P1: painel por cima de clientes e popups.
+    if state.overlay_open {
+        let scale = state.output.current_scale().fractional_scale();
+        crate::overlay::draw_debug_overlay(&mut frame, size, scale);
     }
 
-    if let Some(overlay) = overlay {
-        crate::overlay::draw_dim(&mut frame, size, scale);
-        draw_render_elements::<GlesRenderer, _, _>(
-            &mut frame,
-            1.0,
-            &[overlay.elem],
-            &[overlay.panel_damage],
-        )?;
+    // P0: cursor sempre por cima de tudo (inclusive do painel P1).
+    if let Some(elem) = cursor_elem {
+        draw_render_elements::<GlesRenderer, _, _>(&mut frame, 1.0, &[elem], &[damage])?;
     }
 
     let _ = frame.finish()?;

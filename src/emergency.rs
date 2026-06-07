@@ -1,7 +1,16 @@
-//! Atalhos de emergencia — P0 encerra, P1 abre painel. Usado pelo compositor e pelo thread evdev.
+//! Prioridades de atalho:
+//! - P0: cursor sempre por cima; Ctrl+Alt+Shift+Del encerra; Ctrl+Alt+F1–F12 ou Ctrl+Alt+0–9 troca VT.
+//! - P1: Ctrl+Alt+Del (painel) — interceptado no compositor antes dos clientes.
 
-use std::sync::{atomic::AtomicBool, Arc};
+use std::{
+    process::Command,
+    sync::{
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc, Mutex,
+    },
+};
 
+use calloop::channel::Sender;
 use smithay::input::keyboard::{FilterResult, KeysymHandle, ModifiersState};
 use xkbcommon::xkb::keysyms;
 
@@ -16,18 +25,62 @@ pub enum EmergencyAction {
     ForceQuit,
     /// P1: painel (Ctrl+Alt+Del)
     ToggleOverlay,
-    /// Troca de VT (Ctrl+Alt+F1–F12)
+    /// P0: troca de VT (Ctrl+Alt+F1–F12 ou Ctrl+Alt+0–9)
     SwitchVt(u8),
+}
+
+static LAST_P1_MS: AtomicU64 = AtomicU64::new(0);
+static LAST_P0_VT_MS: AtomicU64 = AtomicU64::new(0);
+const P1_DEBOUNCE_MS: u64 = 250;
+const P0_VT_DEBOUNCE_MS: u64 = 200;
+
+/// Evita que compositor + thread evdev executem o mesmo P1 duas vezes na mesma tecla.
+pub fn try_p1_debounce() -> bool {
+    debounce_ms(&LAST_P1_MS, P1_DEBOUNCE_MS)
+}
+
+/// Evita duplo envio compositor + evdev na mesma tecla (nao compartilha debounce com P1).
+pub fn try_p0_vt_debounce() -> bool {
+    debounce_ms(&LAST_P0_VT_MS, P0_VT_DEBOUNCE_MS)
+}
+
+fn debounce_ms(slot: &AtomicU64, window_ms: u64) -> bool {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let prev = slot.swap(now, Ordering::SeqCst);
+    now.saturating_sub(prev) >= window_ms
 }
 
 pub struct EmergencyContext {
     pub exit_flag: Arc<AtomicBool>,
     pub overlay: Arc<OverlayControl>,
+    vt_sender: Mutex<Option<Sender<u8>>>,
 }
 
 impl EmergencyContext {
     pub fn new(exit_flag: Arc<AtomicBool>, overlay: Arc<OverlayControl>) -> Self {
-        Self { exit_flag, overlay }
+        Self {
+            exit_flag,
+            overlay,
+            vt_sender: Mutex::new(None),
+        }
+    }
+
+    pub fn set_vt_sender(&self, tx: Sender<u8>) {
+        *self.vt_sender.lock().unwrap() = Some(tx);
+    }
+
+    pub fn request_vt_switch(&self, vt: u8) {
+        if let Some(tx) = self.vt_sender.lock().unwrap().as_ref() {
+            if tx.send(vt).is_ok() {
+                tracing::info!("P0 — pedido de troca para tty{vt} (main loop)");
+                return;
+            }
+            tracing::warn!("canal VT cheio — tentando chvt direto");
+        }
+        do_vt_switch(vt);
     }
 }
 
@@ -54,6 +107,16 @@ fn is_delete(sym: u32) -> bool {
 
 fn vt_from_keysym(sym: u32) -> Option<u8> {
     match sym {
+        k if k == keysyms::KEY_1 as u32 => Some(1),
+        k if k == keysyms::KEY_2 as u32 => Some(2),
+        k if k == keysyms::KEY_3 as u32 => Some(3),
+        k if k == keysyms::KEY_4 as u32 => Some(4),
+        k if k == keysyms::KEY_5 as u32 => Some(5),
+        k if k == keysyms::KEY_6 as u32 => Some(6),
+        k if k == keysyms::KEY_7 as u32 => Some(7),
+        k if k == keysyms::KEY_8 as u32 => Some(8),
+        k if k == keysyms::KEY_9 as u32 => Some(9),
+        k if k == keysyms::KEY_0 as u32 => Some(10),
         k if k == keysyms::KEY_F1 as u32 => Some(1),
         k if k == keysyms::KEY_F2 as u32 => Some(2),
         k if k == keysyms::KEY_F3 as u32 => Some(3),
@@ -87,17 +150,15 @@ pub fn execute(action: EmergencyAction, ctx: &EmergencyContext, state: &mut Stat
     match action {
         EmergencyAction::ForceQuit => force_quit(&ctx.exit_flag),
         EmergencyAction::ToggleOverlay => {
-            state.overlay_open = !state.overlay_open;
-            tracing::info!(
-                "Painel P1 {}",
-                if state.overlay_open { "aberto" } else { "fechado" }
-            );
-            if state.overlay_open {
-                seize_for_overlay(state);
+            if try_p1_debounce() {
+                ctx.overlay.toggle_now(state);
             }
-            ctx.overlay.notify_changed();
         }
-        EmergencyAction::SwitchVt(vt) => switch_vt(vt),
+        EmergencyAction::SwitchVt(vt) => {
+            if try_p0_vt_debounce() {
+                ctx.request_vt_switch(vt);
+            }
+        }
     }
 }
 
@@ -114,8 +175,9 @@ pub fn force_quit(exit_flag: &AtomicBool) {
     }
 }
 
-pub fn switch_vt(vt: u8) {
-    tracing::info!("Trocando para tty{vt}");
+/// Troca de VT no kernel (chamar apos pausar DRM no thread principal).
+pub fn do_vt_switch(vt: u8) {
+    tracing::info!("P0 — ativando tty{vt}");
     const VT_ACTIVATE: libc::c_ulong = 0x5606;
     if let Ok(tty0) = std::fs::OpenOptions::new()
         .read(true)
@@ -131,14 +193,19 @@ pub fn switch_vt(vt: u8) {
             )
         };
         if ret == 0 {
+            tracing::info!("ioctl VT_ACTIVATE tty{vt} ok");
             return;
         }
+        tracing::warn!(
+            "ioctl VT_ACTIVATE falhou: {}",
+            std::io::Error::last_os_error()
+        );
     }
-    std::thread::spawn(move || {
-        let _ = std::process::Command::new("chvt")
-            .arg(vt.to_string())
-            .status();
-    });
+    match Command::new("chvt").arg(vt.to_string()).status() {
+        Ok(status) if status.success() => tracing::info!("chvt {vt} ok"),
+        Ok(status) => tracing::warn!("chvt {vt} retornou {status}"),
+        Err(err) => tracing::warn!("chvt indisponivel: {err}"),
+    }
 }
 
 /// Filtro de teclado do compositor — roda ANTES de qualquer cliente Wayland (Konsole, etc.).
@@ -151,6 +218,7 @@ pub fn compositor_keyboard_filter(
 ) -> FilterResult<()> {
     use smithay::backend::input::KeyState;
 
+    // P1 (e P0) sempre antes do filtro do painel e antes dos clientes Wayland.
     if key_state == KeyState::Pressed {
         if let Some(action) = match_combo(modifiers, &keysym) {
             execute(action, ctx, state);
@@ -177,36 +245,11 @@ fn overlay_panel_filter(
         return FilterResult::Intercept(());
     }
     let sym = keysym.modified_sym().raw();
-    match sym {
-        k if k == keysyms::KEY_Escape as u32 || k == keysyms::KEY_Return as u32 => {
-            state.overlay_open = false;
-            FilterResult::Intercept(())
-        }
-        k if k == keysyms::KEY_Left as u32
-            || k == keysyms::KEY_Down as u32
-            || k == keysyms::KEY_minus as u32
-            || k == keysyms::KEY_KP_Subtract as u32 =>
-        {
-            crate::overlay::adjust_speed(state, -0.25);
-            FilterResult::Intercept(())
-        }
-        k if k == keysyms::KEY_Right as u32
-            || k == keysyms::KEY_Up as u32
-            || k == keysyms::KEY_plus as u32
-            || k == keysyms::KEY_equal as u32
-            || k == keysyms::KEY_KP_Add as u32 =>
-        {
-            crate::overlay::adjust_speed(state, 0.25);
-            FilterResult::Intercept(())
-        }
-        k if k == keysyms::KEY_o as u32 || k == keysyms::KEY_O as u32 => {
-            if let Some(tool) = crate::overlay::first_tool() {
-                crate::overlay::launch_tool(&tool);
-            }
-            FilterResult::Intercept(())
-        }
-        _ => FilterResult::Intercept(()),
+    // DEBUG: so Esc fecha o painel.
+    if sym == keysyms::KEY_Escape as u32 {
+        state.overlay_open = false;
     }
+    FilterResult::Intercept(())
 }
 
 /// Evdev: mesma logica P0/P1 para quando o thread consegue ler hardware direto.
@@ -225,6 +268,15 @@ pub fn match_evdev(ctrl: bool, alt: bool, shift: bool, pressed: bool, code: u16)
     }
     if !shift && (KEY_F1..=KEY_F12).contains(&code) {
         return Some(EmergencyAction::SwitchVt((code - KEY_F1 + 1) as u8));
+    }
+    const KEY_1: u16 = 2;
+    const KEY_9: u16 = 10;
+    const KEY_0: u16 = 11;
+    if !shift && (KEY_1..=KEY_9).contains(&code) {
+        return Some(EmergencyAction::SwitchVt((code - KEY_1 + 1) as u8));
+    }
+    if !shift && code == KEY_0 {
+        return Some(EmergencyAction::SwitchVt(10));
     }
     None
 }

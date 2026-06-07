@@ -4,6 +4,7 @@ use std::{
 };
 
 use calloop::{
+    channel::{channel, Event as ChannelEvent},
     signals::{Signal, Signals},
     timer::{TimeoutAction, Timer},
     EventLoop, LoopHandle, LoopSignal,
@@ -301,6 +302,9 @@ pub fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     let handle = event_loop.handle();
     let loop_signal = event_loop.get_signal();
 
+    let (vt_tx, vt_rx) = channel::<u8>();
+    emergency.set_vt_sender(vt_tx);
+
     let mut data = TtyLoop {
         pointer_tracker: PointerTracker::new(state.output_size),
         pointer_cursor: PointerCursor::load(),
@@ -316,6 +320,15 @@ pub fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         libinput,
         start_time: Instant::now(),
     };
+
+    handle.insert_source(vt_rx, move |event, _, data| {
+        if let ChannelEvent::Msg(vt) = event {
+            tracing::info!("P0 — preparando troca para tty{vt} (pause DRM)");
+            data.libinput.suspend();
+            data.device.pause();
+            crate::emergency::do_vt_switch(vt);
+        }
+    })?;
 
     let signal_handle = handle.clone();
     handle.insert_source(
