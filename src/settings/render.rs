@@ -27,6 +27,75 @@ pub struct PanelElement {
     pub elem: MemoryRenderBufferRenderElement<GlesRenderer>,
 }
 
+pub fn prepare_scrim(
+    renderer: &mut GlesRenderer,
+    state: &mut State,
+    output: Size<i32, smithay::utils::Physical>,
+) -> Result<
+    Option<MemoryRenderBufferRenderElement<GlesRenderer>>,
+    Box<dyn std::error::Error>,
+> {
+    if !state.overlay_open {
+        return Ok(None);
+    }
+
+    let key = (output.w, output.h);
+    {
+        let guard = state.overlay_scrim_cache.lock().unwrap();
+        if guard.as_ref().is_some_and(|c| c.size == key) {
+            let buf = &guard.as_ref().unwrap().buffer;
+            let elem = MemoryRenderBufferRenderElement::from_buffer(
+                renderer,
+                (0.0, 0.0),
+                buf,
+                None,
+                None,
+                None,
+                Kind::Unspecified,
+            )?;
+            return Ok(Some(elem));
+        }
+    }
+
+    let mut canvas = Canvas::new(output.w, output.h);
+    canvas.fill(theme::MODAL_SCRIM);
+
+    let mut buffer = MemoryRenderBuffer::new(
+        Fourcc::Argb8888,
+        (output.w, output.h),
+        1,
+        Transform::Normal,
+        None,
+    );
+    {
+        let mut ctx = buffer.render();
+        let _ = ctx.draw(|buf| {
+            buf.copy_from_slice(&canvas.pixels);
+            Ok::<_, std::convert::Infallible>(vec![Rectangle::from_size(Size::from((
+                output.w,
+                output.h,
+            )))])
+        });
+    }
+
+    let elem = MemoryRenderBufferRenderElement::from_buffer(
+        renderer,
+        (0.0, 0.0),
+        &buffer,
+        None,
+        None,
+        None,
+        Kind::Unspecified,
+    )?;
+
+    *state.overlay_scrim_cache.lock().unwrap() = Some(crate::state::OverlayScrimCache {
+        buffer,
+        size: key,
+    });
+
+    Ok(Some(elem))
+}
+
 pub fn prepare_panel(
     renderer: &mut GlesRenderer,
     state: &mut State,

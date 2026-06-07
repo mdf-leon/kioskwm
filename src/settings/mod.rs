@@ -10,7 +10,7 @@ pub mod theme;
 pub mod input;
 
 pub use layout::{ConfirmAction, Screen};
-pub use render::{draw_overlay_extras, prepare_panel};
+pub use render::{draw_overlay_extras, prepare_panel, prepare_scrim};
 
 #[derive(Debug, Clone)]
 pub struct SettingsState {

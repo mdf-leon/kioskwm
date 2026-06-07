@@ -32,6 +32,7 @@ pub fn handle_pointer_button(state: &mut State, pos: Point<f64, smithay::utils::
         Hit::Close => {
             state.overlay_open = false;
             reset_on_open(state);
+            state.clear_wm_backdrop();
             state.request_render();
         }
         Hit::AppletMouse => {
@@ -72,9 +73,9 @@ pub fn handle_pointer_button(state: &mut State, pos: Point<f64, smithay::utils::
     }
 }
 
-pub fn handle_pointer_motion(state: &mut State, pos: Point<f64, smithay::utils::Logical>) {
+pub fn handle_pointer_motion(state: &mut State, pos: Point<f64, smithay::utils::Logical>) -> bool {
     if !state.overlay_open {
-        return;
+        return false;
     }
 
     let hit = layout::pointer_to_panel_local(
@@ -87,9 +88,11 @@ pub fn handle_pointer_motion(state: &mut State, pos: Point<f64, smithay::utils::
     .unwrap_or(Hit::None);
 
     let hover = (hit != Hit::None).then_some(hit);
+    let mut needs_render = false;
     if state.settings.hover != hover {
         state.settings.hover = hover;
         invalidate_cache(state);
+        needs_render = true;
     }
 
     if state.settings.slider_drag
@@ -102,10 +105,16 @@ pub fn handle_pointer_motion(state: &mut State, pos: Point<f64, smithay::utils::
             state.output_size.w,
             state.output_size.h,
         ) else {
-            return;
+            return needs_render;
         };
+        let before = state.pointer_speed;
         apply_speed(state, layout::slider_value_from_x(lx));
+        if (state.pointer_speed - before).abs() >= 0.0001 {
+            needs_render = true;
+        }
     }
+
+    needs_render
 }
 
 pub fn handle_pointer_release(state: &mut State) {
@@ -154,7 +163,10 @@ pub fn keyboard_filter(
     match sym {
         k if k == keysyms::KEY_Escape as u32 => {
             match state.settings.screen {
-                Screen::Main => state.overlay_open = false,
+                Screen::Main => {
+                    state.overlay_open = false;
+                    state.clear_wm_backdrop();
+                }
                 Screen::Mouse => {
                     state.settings.screen = Screen::Main;
                     invalidate_cache(state);

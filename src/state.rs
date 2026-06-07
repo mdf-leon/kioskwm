@@ -24,6 +24,16 @@ pub struct AltTabCache {
     pub key: u64,
 }
 
+pub struct OverlayScrimCache {
+    pub buffer: MemoryRenderBuffer,
+    pub size: (i32, i32),
+}
+
+pub struct WmBackdropCache {
+    pub buffer: MemoryRenderBuffer,
+    pub size: (i32, i32),
+}
+
 use smithay::{
     backend::{
         allocator::{dmabuf::Dmabuf, format::FormatSet, Buffer},
@@ -127,10 +137,14 @@ pub struct State {
     pub pointer_speed: f64,
     pub settings: crate::settings::SettingsState,
     pub settings_cache: Mutex<Option<SettingsPanelCache>>,
+    pub overlay_scrim_cache: Mutex<Option<OverlayScrimCache>>,
     pub context_menu: crate::context_menu::ContextMenuState,
     pub context_menu_cache: Mutex<Option<ContextMenuCache>>,
     pub alt_tab: crate::alt_tab::AltTabState,
     pub alt_tab_cache: Mutex<Option<AltTabCache>>,
+    /// Snapshot da app congelada atrás de overlay/menu WM.
+    pub(crate) wm_backdrop: Mutex<Option<WmBackdropCache>>,
+    pub(crate) wm_backdrop_stale: bool,
     /// Apps recentes (índices unificados) para Alt+Tab.
     pub app_mru: Vec<usize>,
     pub i18n: crate::i18n::I18n,
@@ -205,9 +219,23 @@ impl State {
             || self.active_popup.is_some()
     }
 
-    /// Overlay WM aberto — não compor apps por baixo (só painel/menu).
+    /// Alt+Tab cobre a tela inteira — não precisa compor app por baixo.
     pub fn wm_ui_obscures_apps(&self) -> bool {
-        self.overlay_open || self.context_menu.open || self.alt_tab.open
+        self.alt_tab.open
+    }
+
+    /// Overlay/menu WM: usa snapshot congelado em vez de recomposição live.
+    pub fn uses_wm_backdrop(&self) -> bool {
+        self.overlay_open || self.context_menu.open
+    }
+
+    pub fn invalidate_wm_backdrop(&mut self) {
+        self.wm_backdrop_stale = true;
+    }
+
+    pub fn clear_wm_backdrop(&mut self) {
+        *self.wm_backdrop.lock().unwrap() = None;
+        self.wm_backdrop_stale = false;
     }
 
     pub fn last_cursor_pos(&self) -> Option<Point<f64, Logical>> {
@@ -283,7 +311,7 @@ impl State {
     }
 
     fn note_surface_commit(&mut self, surface: &WlSurface) {
-        if self.wm_ui_obscures_apps() {
+        if self.uses_wm_backdrop() || self.alt_tab.open {
             return;
         }
         let has_buffer = with_states(surface, |states| {
@@ -535,6 +563,8 @@ impl State {
     }
 
     pub fn update_output_mode(&mut self, physical: smithay::utils::Size<i32, smithay::utils::Physical>) {
+        self.invalidate_wm_backdrop();
+        *self.overlay_scrim_cache.lock().unwrap() = None;
         self.output_size = physical.to_logical(1);
         let mode = Mode {
             size: physical,
@@ -1005,10 +1035,13 @@ pub fn init_state(
         pointer_speed: 1.0,
         settings: crate::settings::SettingsState::default(),
         settings_cache: Mutex::new(None),
+        overlay_scrim_cache: Mutex::new(None),
         context_menu: crate::context_menu::ContextMenuState::default(),
         context_menu_cache: Mutex::new(None),
         alt_tab: crate::alt_tab::AltTabState::default(),
         alt_tab_cache: Mutex::new(None),
+        wm_backdrop: Mutex::new(None),
+        wm_backdrop_stale: false,
         app_mru: Vec::new(),
         i18n,
         mod_tracker,

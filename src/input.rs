@@ -148,11 +148,13 @@ pub fn handle_input<B: InputBackend>(
             state.pointer_pos = tracker.pos;
             hardware.set_pointer(tracker.pos.x, tracker.pos.y);
             if state.overlay_open {
-                crate::settings::input::handle_pointer_motion(state, tracker.pos);
-                state.request_render();
+                if crate::settings::input::handle_pointer_motion(state, tracker.pos) {
+                    state.request_render_debounced(Duration::from_millis(16));
+                }
             } else if state.context_menu.open {
-                crate::context_menu::handlers::handle_pointer_motion(state, tracker.pos);
-                state.request_render();
+                if crate::context_menu::handlers::handle_pointer_motion(state, tracker.pos) {
+                    state.request_render_debounced(Duration::from_millis(16));
+                }
             } else {
                 queue_pointer_render(state, event.time() as u32);
             }
@@ -164,11 +166,13 @@ pub fn handle_input<B: InputBackend>(
             state.pointer_pos = tracker.pos;
             hardware.set_pointer(tracker.pos.x, tracker.pos.y);
             if state.overlay_open {
-                crate::settings::input::handle_pointer_motion(state, tracker.pos);
-                state.request_render();
+                if crate::settings::input::handle_pointer_motion(state, tracker.pos) {
+                    state.request_render_debounced(Duration::from_millis(16));
+                }
             } else if state.context_menu.open {
-                crate::context_menu::handlers::handle_pointer_motion(state, tracker.pos);
-                state.request_render();
+                if crate::context_menu::handlers::handle_pointer_motion(state, tracker.pos) {
+                    state.request_render_debounced(Duration::from_millis(16));
+                }
             } else {
                 queue_pointer_render(state, event.time() as u32);
             }

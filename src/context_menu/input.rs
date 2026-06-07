@@ -40,6 +40,7 @@ pub fn open_at_logical(state: &mut State, x: f64, y: f64) {
         other => Some(other),
     };
     invalidate_cache(state);
+    state.invalidate_wm_backdrop();
     state.note_full_damage();
     state.request_render();
     let count = state.app_count();
@@ -61,6 +62,7 @@ pub fn close(state: &mut State) {
     state.context_menu.open = false;
     state.context_menu.hover = None;
     invalidate_cache(state);
+    state.clear_wm_backdrop();
     state.resync_input_after_overlay();
     state.request_render();
 }
@@ -94,14 +96,16 @@ pub fn handle_pointer_button(
             close(state);
             state.overlay_open = true;
             reset_on_open(state);
+            state.invalidate_wm_backdrop();
+            state.request_render();
         }
         Hit::None => close(state),
     }
 }
 
-pub fn handle_pointer_motion(state: &mut State, pos: Point<f64, smithay::utils::Logical>) {
+pub fn handle_pointer_motion(state: &mut State, pos: Point<f64, smithay::utils::Logical>) -> bool {
     if !state.context_menu.open {
-        return;
+        return false;
     }
 
     let hit = layout::hit_test(
@@ -118,7 +122,9 @@ pub fn handle_pointer_motion(state: &mut State, pos: Point<f64, smithay::utils::
     if state.context_menu.hover != hover {
         state.context_menu.hover = hover;
         invalidate_cache(state);
+        return true;
     }
+    false
 }
 
 pub fn keyboard_filter(

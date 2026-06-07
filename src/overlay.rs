@@ -34,6 +34,9 @@ impl OverlayControl {
         state.overlay_open = !state.overlay_open;
         if state.overlay_open {
             input::reset_on_open(state);
+            state.invalidate_wm_backdrop();
+        } else {
+            state.clear_wm_backdrop();
         }
         tracing::info!(
             "Painel P1 {} (overlay_open={})",
@@ -58,6 +61,9 @@ impl OverlayControl {
             state.overlay_open = !state.overlay_open;
             if state.overlay_open {
                 input::reset_on_open(state);
+                state.invalidate_wm_backdrop();
+            } else {
+                state.clear_wm_backdrop();
             }
             tracing::info!(
                 "Painel P1 {} (overlay_open={})",

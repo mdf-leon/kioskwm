@@ -1,5 +1,6 @@
 mod alt_tab;
 mod apps;
+mod backdrop;
 mod context_menu;
 mod cursor;
 mod emergency;
