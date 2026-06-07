@@ -21,7 +21,7 @@ Pin a version:
 curl -fsSL https://raw.githubusercontent.com/mdf-leon/kioskwm/main/install/install.sh | bash -s -- --version v0.1.0
 ```
 
-Site: https://mdf-leon.github.io/kioskwm/
+Site: https://mdf-leon.github.io/kioskwm/ (instalação, atalhos, deps, imagem server, desinstalar)
 
 ## Features
 
