@@ -12,9 +12,7 @@ use smithay::{
     },
     desktop::PopupManager,
     utils::{Logical, Physical, Point, Rectangle, Scale, Transform},
-    wayland::compositor::{
-        with_states, with_surface_tree_downward, SurfaceAttributes, TraversalAction,
-    },
+    wayland::compositor::{with_surface_tree_downward, SurfaceAttributes, TraversalAction},
 };
 use wayland_server::{protocol::wl_surface, Resource};
 
@@ -117,13 +115,10 @@ pub fn render_kiosk_frame(
             Kind::Unspecified,
         ));
 
-        for (popup, _) in PopupManager::popups_for_surface(surface.wl_surface()) {
+        for (popup, popup_offset) in PopupManager::popups_for_surface(surface.wl_surface()) {
             rendered_popups.insert(popup.wl_surface().id());
             let wl = popup.wl_surface();
-            let Some((ox, oy)) = state.popup_compositor_offset(wl) else {
-                tracing::warn!("popup sem offset");
-                continue;
-            };
+            let (ox, oy) = state.popup_render_offset(&popup, popup_offset);
             let _ = import_surface_tree(renderer, wl);
 
             let mut elems = render_popup_surface_tree(renderer, wl, (ox, oy), Scale::from(1.0));
@@ -150,7 +145,7 @@ pub fn render_kiosk_frame(
         if rendered_popups.contains(&wl.id()) {
             continue;
         }
-        let Some((ox, oy)) = state.popup_compositor_offset(wl) else {
+        let Some((ox, oy)) = state.popup_render_offset_for(wl) else {
             continue;
         };
         let _ = import_surface_tree(renderer, wl);

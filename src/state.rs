@@ -1,5 +1,4 @@
 use std::{
-    collections::HashMap,
     os::unix::io::OwnedFd,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -42,15 +41,15 @@ use smithay::{
             SelectionHandler,
         },
         shell::xdg::{
-            PopupSurface, PositionerState, SurfaceCachedState, ToplevelSurface, XdgShellHandler,
-            XdgShellState, XDG_POPUP_ROLE,
+            PopupSurface, PositionerState, SurfaceCachedState, ToplevelSurface,
+            XdgShellHandler, XdgShellState, XDG_POPUP_ROLE,
         },
         shm::{ShmHandler, ShmState},
     },
 };
 use wayland_protocols::xdg::shell::server::xdg_toplevel;
 use wayland_server::{
-    backend::{ClientData, ClientId, DisconnectReason, ObjectId},
+    backend::{ClientData, ClientId, DisconnectReason},
     protocol::{
         wl_buffer,
         wl_surface::WlSurface,
@@ -76,8 +75,6 @@ pub struct State {
     pub primary_toplevel: Option<ToplevelSurface>,
     pub active_popup: Option<PopupSurface>,
     pub popup_manager: PopupManager,
-    /// Posição do popup no espaço do compositor (definida no configure, antes do ack do cliente).
-    popup_render_offsets: HashMap<ObjectId, (i32, i32)>,
     pub pointer_pos: Point<f64, Logical>,
     pub output_size: Size<i32, Logical>,
     pub exit_requested: Arc<AtomicBool>,
@@ -102,11 +99,33 @@ impl State {
         self.serial.into()
     }
 
-    /// Posição do popup no espaço do compositor.
-    /// Usa o valor guardado em configure, que é `geometry.loc` do positioner
-    /// (relativo à superfície do pai = compositor, já que o toplevel está em (0,0)).
-    pub fn popup_compositor_offset(&self, wl: &WlSurface) -> Option<(i32, i32)> {
-        self.popup_render_offsets.get(&wl.id()).copied()
+    /// Posição de desenho no compositor.
+    /// `popup_offset` vem do PopupManager (soma dos configure.loc na árvore).
+    /// Qt/Konsole desenha buffers na origem da wl_surface — não subtrair window_geometry.
+    pub fn popup_render_offset(
+        &self,
+        popup: &PopupKind,
+        popup_offset: smithay::utils::Point<i32, Logical>,
+    ) -> (i32, i32) {
+        let _ = popup;
+        let tg = self.toplevel_window_geometry();
+        (tg.loc.x + popup_offset.x, tg.loc.y + popup_offset.y)
+    }
+
+    pub(crate) fn popup_render_offset_for(&self, wl: &WlSurface) -> Option<(i32, i32)> {
+        let toplevel = self.primary_toplevel.as_ref()?.wl_surface();
+        for (popup, popup_offset) in PopupManager::popups_for_surface(toplevel) {
+            if popup.wl_surface() == wl {
+                return Some(self.popup_render_offset(&popup, popup_offset));
+            }
+        }
+        None
+    }
+
+    fn topmost_popup(&self) -> Option<PopupKind> {
+        let toplevel = self.primary_toplevel.as_ref()?.wl_surface();
+        // DFS: filhos antes do pai — o primeiro é o popup mais profundo (submenu ativo).
+        PopupManager::popups_for_surface(toplevel).next().map(|(p, _)| p)
     }
 
     pub fn toplevel_window_geometry(&self) -> Rectangle<i32, Logical> {
@@ -126,32 +145,22 @@ impl State {
 
     /// Origem da superfície focada no espaço do compositor (não a posição do cursor).
     fn surface_origin_for(&self, surface: &WlSurface) -> Point<f64, Logical> {
-        if let Some((ox, oy)) = self.popup_compositor_offset(surface) {
+        if let Some((ox, oy)) = self.popup_render_offset_for(surface) {
             return Point::from((ox as f64, oy as f64));
         }
         Point::from((0.0, 0.0))
     }
 
-    fn parent_constraint_rect(&self, popup: &PopupSurface) -> Rectangle<i32, Logical> {
-        popup
-            .get_parent_surface()
-            .map(|parent| {
-                with_states(&parent, |states| {
-                    states
-                        .cached_state
-                        .get::<SurfaceCachedState>()
-                        .current()
-                        .geometry
-                        .filter(|g| g.size.w > 0 && g.size.h > 0)
-                        .unwrap_or_else(|| Rectangle::from_size(self.output_size))
-                })
-            })
-            .unwrap_or_else(|| Rectangle::from_size(self.output_size))
+    /// Retângulo de constraint para o positioner (coords da superfície do pai).
+    /// No kiosk o toplevel cobre o output; usar o tamanho do output evita que
+    /// submenus sejam deslizados para dentro do popup pai (slide_x).
+    fn parent_constraint_rect(&self, _popup: &PopupSurface) -> Rectangle<i32, Logical> {
+        Rectangle::from_size(self.output_size)
     }
 
     pub fn pointer_focus(&self) -> Option<(WlSurface, Point<f64, Logical>)> {
-        let surface = if let Some(popup) = &self.active_popup {
-            popup.wl_surface().clone()
+        let surface = if let Some(topmost) = self.topmost_popup() {
+            topmost.wl_surface().clone()
         } else {
             self.primary_toplevel.as_ref()?.wl_surface().clone()
         };
@@ -202,20 +211,25 @@ impl State {
     }
 
     fn configure_popup(&mut self, surface: &PopupSurface, positioner: PositionerState) {
-        // O constraint_rect deve ser o output (em coords da superfície do pai).
-        // geometry.loc do positioner é relativo à superfície do pai, que está em (0,0),
-        // portanto geometry.loc = posição no espaço do compositor.
-        let constraint_rect = Rectangle::from_size(self.output_size);
-        let geometry = positioner.get_unconstrained_geometry(constraint_rect);
-        let compositor_xy = geometry.loc;
-        self.popup_render_offsets
-            .insert(surface.wl_surface().id(), (compositor_xy.x, compositor_xy.y));
+        let parent_rect = self.parent_constraint_rect(surface);
+        let geometry = positioner.get_unconstrained_geometry(parent_rect);
+        let nested = surface
+            .get_parent_surface()
+            .is_some_and(|p| smithay::wayland::compositor::get_role(&p) == Some(XDG_POPUP_ROLE));
+        let kind = PopupKind::Xdg(surface.clone());
+        let tree_offset = smithay::desktop::get_popup_toplevel_coords(&kind) + geometry.loc;
+        let tg = self.toplevel_window_geometry();
         tracing::info!(
-            "popup pos=({}, {}) size={}x{}",
-            compositor_xy.x,
-            compositor_xy.y,
+            "popup {} configure rel=({}, {}) compositor~=({}, {}) size={}x{} parent_rect={}x{}",
+            if nested { "submenu" } else { "menu" },
+            geometry.loc.x,
+            geometry.loc.y,
+            tg.loc.x + tree_offset.x,
+            tg.loc.y + tree_offset.y,
             geometry.size.w,
             geometry.size.h,
+            parent_rect.size.w,
+            parent_rect.size.h,
         );
         surface.with_pending_state(|state| {
             state.geometry = geometry;
@@ -429,9 +443,6 @@ impl XdgShellHandler for State {
     ) {
         let parent_rect = self.parent_constraint_rect(&surface);
         let geometry = positioner.get_unconstrained_geometry(parent_rect);
-        let compositor_xy = parent_rect.loc + geometry.loc;
-        self.popup_render_offsets
-            .insert(surface.wl_surface().id(), (compositor_xy.x, compositor_xy.y));
         surface.with_pending_state(|state| {
             state.geometry = geometry;
         });
@@ -453,21 +464,45 @@ impl XdgShellHandler for State {
     }
 
     fn popup_destroyed(&mut self, surface: PopupSurface) {
-        tracing::info!("popup destruído");
-        self.popup_render_offsets.remove(&surface.wl_surface().id());
+        tracing::debug!("popup destruído");
         let was_active = self
             .active_popup
             .as_ref()
             .is_some_and(|p| p.wl_surface() == surface.wl_surface());
-        if was_active {
-            self.active_popup = None;
-            if self.pointer.is_grabbed() {
+
+        if !was_active {
+            return;
+        }
+
+        // Submenu fechou: volta ao popup pai, não derruba o menu inteiro.
+        if let Some(topmost) = self.topmost_popup() {
+            if let PopupKind::Xdg(parent) = topmost {
+                self.active_popup = Some(parent.clone());
+                let wl = parent.wl_surface().clone();
+                let origin = self.surface_origin_for(&wl);
                 let pointer = self.pointer.clone();
                 let serial = self.next_serial();
-                pointer.unset_grab(self, serial, 0);
+                pointer.motion(
+                    self,
+                    Some((wl, origin)),
+                    &MotionEvent {
+                        location: self.pointer_pos,
+                        serial,
+                        time: 0,
+                    },
+                );
+                pointer.frame(self);
+                return;
             }
-            self.restore_pointer_to_toplevel();
         }
+
+        self.active_popup = None;
+        if self.pointer.is_grabbed() {
+            let pointer = self.pointer.clone();
+            let serial = self.next_serial();
+            pointer.unset_grab(self, serial, 0);
+        }
+        self.restore_pointer_to_toplevel();
     }
 }
 
@@ -624,7 +659,6 @@ pub fn init_state(
         primary_toplevel: None,
         active_popup: None,
         popup_manager: PopupManager::default(),
-        popup_render_offsets: HashMap::new(),
         pointer_pos: Point::from((logical_size.w as f64 / 2.0, logical_size.h as f64 / 2.0)),
         output_size: logical_size,
         exit_requested,
