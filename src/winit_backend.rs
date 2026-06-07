@@ -12,6 +12,9 @@ use wayland_server::ListeningSocket;
 
 use crate::{
     input::{debug_right_click, handle_input, PointerTracker},
+    emergency::EmergencyContext,
+    kill_switch,
+    overlay::OverlayControl,
     render::{render_kiosk_frame, send_frame_callbacks},
     spawn::{command_exists, resolve_terminal, schedule_spawn},
     state::{accept_clients, accept_clients_rounds, init_state, new_exit_flag, should_exit, State},
@@ -72,6 +75,13 @@ pub fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
 
     tracing::info!("Janela do compositor aberta — feche-a para sair");
 
+    let overlay = OverlayControl::new();
+    let emergency = std::sync::Arc::new(EmergencyContext::new(
+        state.exit_requested.clone(),
+        overlay.clone(),
+    ));
+    kill_switch::spawn(emergency.clone());
+
     let start_time = Instant::now();
     let mut pointer_tracker = PointerTracker::new(state.output_size);
     let auto_rclick = std::env::var_os("KIOSKWM_DEBUG_RCLICK").is_some();
@@ -84,9 +94,19 @@ pub fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                 state.update_output_mode(size);
                 pointer_tracker.clamp(state.output_size);
             }
-            WinitEvent::Input(event) => handle_input(&mut state, &mut pointer_tracker, event),
+            WinitEvent::Input(event) => {
+                handle_input(
+                    &mut state,
+                    &mut pointer_tracker,
+                    &overlay,
+                    &emergency,
+                    event,
+                )
+            }
             _ => {}
         });
+
+        overlay.poll(&mut state);
 
         if matches!(status, ::winit::platform::pump_events::PumpStatus::Exit(_))
             || should_exit(&state.exit_requested)
@@ -104,7 +124,7 @@ pub fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             render_kiosk_frame(
                 renderer,
                 &mut framebuffer,
-                &state,
+                &mut state,
                 size,
                 Transform::Flipped180,
                 Some(pointer_tracker.pos),

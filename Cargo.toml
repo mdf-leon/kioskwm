@@ -24,3 +24,4 @@ winit = "0.30"
 xkbcommon = "0.8"
 calloop = { version = "0.14", features = ["signals"] }
 xcursor = "0.3"
+libc = "0.2"

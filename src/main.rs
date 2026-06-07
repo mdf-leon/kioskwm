@@ -1,6 +1,10 @@
 mod cursor;
+mod emergency;
 mod env_detect;
+mod font8x8;
 mod input;
+mod kill_switch;
+mod overlay;
 mod render;
 mod spawn;
 mod state;

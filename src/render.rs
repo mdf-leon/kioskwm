@@ -93,7 +93,7 @@ pub fn send_frames_surface_tree(surface: &wl_surface::WlSurface, time: u32) {
 pub fn render_kiosk_frame(
     renderer: &mut GlesRenderer,
     target: &mut smithay::backend::renderer::gles::GlesTarget<'_>,
-    state: &State,
+    state: &mut State,
     size: smithay::utils::Size<i32, smithay::utils::Physical>,
     transform: Transform,
     pointer: Option<Point<f64, Logical>>,
@@ -167,12 +167,25 @@ pub fn render_kiosk_frame(
         _ => None,
     };
 
+    let overlay = crate::overlay::prepare_overlay(renderer, state, size)?;
+    let scale = state.output.current_scale().fractional_scale();
+
     let mut frame = renderer.render(target, size, transform)?;
     frame.clear(Color32F::new(0.08, 0.08, 0.08, 1.0), &[damage])?;
     draw_render_elements::<GlesRenderer, _, _>(&mut frame, 1.0, &elements, &[damage])?;
 
     if let Some(elem) = cursor_elem {
         draw_render_elements::<GlesRenderer, _, _>(&mut frame, 1.0, &[elem], &[damage])?;
+    }
+
+    if let Some(overlay) = overlay {
+        crate::overlay::draw_dim(&mut frame, size, scale);
+        draw_render_elements::<GlesRenderer, _, _>(
+            &mut frame,
+            1.0,
+            &[overlay.elem],
+            &[overlay.panel_damage],
+        )?;
     }
 
     let _ = frame.finish()?;

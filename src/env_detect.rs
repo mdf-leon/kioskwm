@@ -8,6 +8,15 @@ pub fn on_hardware_tty() -> bool {
         .unwrap_or(false)
 }
 
+pub fn is_kde_session() -> bool {
+    std::env::var("XDG_CURRENT_DESKTOP")
+        .map(|v| v.to_lowercase().contains("kde"))
+        .unwrap_or(false)
+        || std::env::var("KDE_FULL_SESSION")
+            .map(|v| !v.is_empty())
+            .unwrap_or(false)
+}
+
 pub fn has_graphical_session() -> bool {
     std::env::var_os("WAYLAND_DISPLAY").is_some() || std::env::var_os("DISPLAY").is_some()
 }

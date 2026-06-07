@@ -38,6 +38,9 @@ use wayland_server::ListeningSocket;
 use crate::{
     cursor::PointerCursor,
     input::{handle_input, PointerTracker},
+    emergency::EmergencyContext,
+    kill_switch,
+    overlay::OverlayControl,
     render::{render_kiosk_frame, send_frame_callbacks},
     spawn::{command_exists, resolve_terminal, schedule_spawn},
     state::{accept_clients, accept_clients_rounds, init_state, new_exit_flag, should_exit, State},
@@ -64,6 +67,8 @@ struct TtyLoop {
     libinput: Libinput,
     pointer_tracker: PointerTracker,
     pointer_cursor: PointerCursor,
+    overlay: std::sync::Arc<OverlayControl>,
+    emergency: std::sync::Arc<EmergencyContext>,
     loop_signal: LoopSignal,
     start_time: Instant,
 }
@@ -164,7 +169,7 @@ impl TtyLoop {
             render_kiosk_frame(
                 &mut self.renderer,
                 &mut target,
-                &self.state,
+                &mut self.state,
                 size,
                 Transform::Normal,
                 Some(self.pointer_tracker.pos),
@@ -273,7 +278,13 @@ pub fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         .into_owned();
 
     tracing::info!("Socket Wayland do kioskwm: {}", socket_name);
-    tracing::info!("Compositor ativo — Ctrl+Alt+F1/F3 troca de VT sem afetar o KDE");
+
+    let overlay = OverlayControl::new();
+    let emergency = std::sync::Arc::new(EmergencyContext::new(
+        state.exit_requested.clone(),
+        overlay.clone(),
+    ));
+    kill_switch::spawn(emergency.clone());
 
     if !args.no_spawn {
         schedule_spawn(terminal, socket_name, args.spawn_delay_ms);
@@ -294,6 +305,8 @@ pub fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         pointer_tracker: PointerTracker::new(state.output_size),
         pointer_cursor: PointerCursor::load(),
         loop_signal: loop_signal.clone(),
+        overlay,
+        emergency,
         state,
         display,
         listener,
@@ -304,19 +317,34 @@ pub fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         start_time: Instant::now(),
     };
 
-    handle.insert_source(Signals::new(&[Signal::SIGINT, Signal::SIGTERM])?, {
-        let loop_signal = loop_signal.clone();
-        move |sig, _, data| {
-            tracing::info!("Sinal {sig:?} — fechando compositor");
-            crate::state::request_exit(&data.state.exit_requested);
-            loop_signal.stop();
-        }
-    })?;
+    let signal_handle = handle.clone();
+    handle.insert_source(
+        Signals::new(&[Signal::SIGINT, Signal::SIGTERM, Signal::SIGUSR1, Signal::SIGUSR2])?,
+        {
+            let loop_signal = loop_signal.clone();
+            move |event, _, data| {
+                if event.signal() == Signal::SIGUSR2 {
+                    data.overlay.poll(&mut data.state);
+                    request_render(&signal_handle);
+                } else {
+                    tracing::info!("Sinal {:?} — fechando compositor", event.signal());
+                    crate::state::request_exit(&data.state.exit_requested);
+                    loop_signal.stop();
+                }
+            }
+        },
+    )?;
 
     handle.insert_source(libinput_backend, {
         let handle = handle.clone();
         move |event, _, data| {
-            handle_input(&mut data.state, &mut data.pointer_tracker, event);
+            handle_input(
+                &mut data.state,
+                &mut data.pointer_tracker,
+                &data.overlay,
+                &data.emergency,
+                event,
+            );
             request_render(&handle);
         }
     })?;

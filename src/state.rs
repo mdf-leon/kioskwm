@@ -2,9 +2,16 @@ use std::{
     os::unix::io::OwnedFd,
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc,
+        Arc, Mutex,
     },
 };
+
+use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
+
+pub struct OverlayPanelCache {
+    pub buffer: MemoryRenderBuffer,
+    pub speed_bits: u64,
+}
 
 use smithay::{
     backend::{
@@ -78,6 +85,10 @@ pub struct State {
     pub pointer_pos: Point<f64, Logical>,
     pub output_size: Size<i32, Logical>,
     pub exit_requested: Arc<AtomicBool>,
+    pub overlay_open: bool,
+    /// Multiplicador de movimento do ponteiro (1.0 = padrao).
+    pub pointer_speed: f64,
+    pub overlay_panel: Mutex<Option<OverlayPanelCache>>,
     serial: u32,
 }
 
@@ -662,6 +673,9 @@ pub fn init_state(
         pointer_pos: Point::from((logical_size.w as f64 / 2.0, logical_size.h as f64 / 2.0)),
         output_size: logical_size,
         exit_requested,
+        overlay_open: false,
+        pointer_speed: 1.0,
+        overlay_panel: Mutex::new(None),
         serial: 0,
     })
 }
