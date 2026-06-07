@@ -22,17 +22,21 @@
   <main>
     <h1>kioskwm</h1>
     <p class="tagline">Wayland compositor for kiosk and nested desktop use.</p>
+
+    <section>
+      <h2>Install</h2>
+      <pre><code>curl -fsSL https://raw.githubusercontent.com/mdf-leon/kioskwm/main/install/install.sh | bash</code></pre>
+    </section>
+
+    <section>
+      <h2>Run</h2>
+      <pre><code>kioskwm --desktop   # nested in Konsole/Plasma
+kioskwm             # TTY kiosk</code></pre>
+    </section>
+
     <section>
       <h2>Repository</h2>
       <p><a href="https://github.com/mdf-leon/kioskwm">github.com/mdf-leon/kioskwm</a></p>
-    </section>
-    <section>
-      <h2>Run (nested)</h2>
-      <pre><code>cargo run --release -- --desktop</code></pre>
-    </section>
-    <section>
-      <h2>Ubuntu runtime deps</h2>
-      <pre><code>sudo apt install libseat1 libinput10 libgbm1 libxkbcommon0 libudev1 libdrm2 xwayland</code></pre>
     </section>
   </main>
 </body>
