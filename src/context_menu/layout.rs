@@ -158,6 +158,10 @@ pub fn app_label(i18n: I18n, app: &apps::RunningApp, focused: bool) -> String {
 }
 
 pub fn unified_label(i18n: I18n, name: &str, focused: bool) -> String {
-    let main = i18n.t(crate::i18n::Msg::Main);
-    apps::menu_label(main, name) + if focused { "  ●" } else { "" }
+    if focused {
+        let main = i18n.t(crate::i18n::Msg::Main);
+        format!("{}  ●", apps::menu_label(main, name))
+    } else {
+        name.to_string()
+    }
 }

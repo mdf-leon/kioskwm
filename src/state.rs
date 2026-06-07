@@ -102,6 +102,8 @@ pub struct State {
     pub x11_focus_pending: bool,
     /// Input deve ir ao X11 (false ao mapear: só sobe z-order, Konsole segue respondendo).
     pub x11_input_wanted: bool,
+    /// Índice X11 recém-aberto — auto-foco só no primeiro map, não em remaps.
+    pub x11_autofocus_idx: Option<usize>,
     /// apply_focus adiado enquanto menu/painel WM estão abertos.
     pub deferred_focus: bool,
     pub xwayland_shell_state: XWaylandShellState,
@@ -190,8 +192,14 @@ impl State {
     }
 
     fn topmost_popup(&self) -> Option<PopupKind> {
-        let toplevel = self.focused_toplevel()?.wl_surface();
-        PopupManager::popups_for_surface(toplevel).next().map(|(p, _)| p)
+        let wl = if self.x11_input_active() {
+            self.x11_apps
+                .get(self.focused_x11)
+                .and_then(|a| a.surface.wl_surface())?
+        } else {
+            self.focused_toplevel()?.wl_surface().clone()
+        };
+        PopupManager::popups_for_surface(&wl).next().map(|(p, _)| p)
     }
 
     pub fn toplevel_window_geometry(&self) -> Rectangle<i32, Logical> {
@@ -228,22 +236,23 @@ impl State {
     }
 
     pub fn pointer_focus(&self) -> Option<(WlSurface, Point<f64, Logical>)> {
-        if !self.x11_input_active() {
-            if let Some(topmost) = self.topmost_popup() {
-                let surface = topmost.wl_surface().clone();
-                let origin = self.surface_origin_for(&surface);
-                return Some((surface, origin));
-            }
-            if let Some(top) = self.focused_toplevel() {
-                let surface = top.wl_surface().clone();
-                let origin = self.surface_origin_for(&surface);
-                return Some((surface, origin));
-            }
-            return None;
+        if let Some(topmost) = self.topmost_popup() {
+            let surface = topmost.wl_surface().clone();
+            let origin = self.surface_origin_for(&surface);
+            return Some((surface, origin));
         }
-        let app = self.x11_apps.get(self.focused_x11)?;
-        let surface = app.surface.wl_surface()?;
-        Some((surface, Point::from((0.0, 0.0))))
+        match self.active_target() {
+            Some(crate::apps::ActiveTarget::X11(i)) => {
+                let surface = self.x11_apps.get(i)?.surface.wl_surface()?;
+                Some((surface, Point::from((0.0, 0.0))))
+            }
+            Some(crate::apps::ActiveTarget::Wayland(i)) => {
+                let surface = self.running_apps.get(i)?.surface.wl_surface().clone();
+                let origin = self.surface_origin_for(&surface);
+                Some((surface, origin))
+            }
+            None => None,
+        }
     }
 
     fn restore_pointer_to_toplevel(&mut self) {
@@ -829,6 +838,7 @@ pub fn init_state(
         focused_is_x11: false,
         x11_focus_pending: false,
         x11_input_wanted: false,
+        x11_autofocus_idx: None,
         deferred_focus: false,
         xwayland_shell_state: XWaylandShellState::new::<State>(dh),
         xwayland_keyboard_grab_state: XWaylandKeyboardGrabState::new::<State>(dh),

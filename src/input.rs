@@ -202,11 +202,6 @@ pub fn handle_input<B: InputBackend>(
                 crate::context_menu::handlers::open_at(state, tracker.pos);
                 return;
             }
-            if state.focused_is_x11 && !state.x11_input_wanted {
-                let idx = state.focused_x11;
-                tracing::info!("Clique na app X11 — ativando input");
-                state.focus_x11(idx);
-            }
             let time = event.time() as u32;
             tracing::debug!(
                 "botão {} {:?} em ({:.0}, {:.0})",

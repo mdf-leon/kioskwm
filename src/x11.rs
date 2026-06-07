@@ -67,22 +67,23 @@ impl XwmHandler for State {
         // principal enquanto o cliente (Kate) ainda está mapeando.
         let _ = window.set_mapped(true);
         self.purge_xwayland_from_running_apps();
-        let idx = if let Some(idx) = self.x11_apps.iter().position(|a| a.surface == window) {
-            idx
+        let is_new = if self.x11_apps.iter().any(|a| a.surface == window) {
+            false
         } else {
             let idx = self.x11_apps.len();
             self.x11_apps.push(X11App {
                 surface: window,
                 display_name: name.clone(),
             });
+            self.x11_autofocus_idx = Some(idx);
             crate::context_menu::invalidate_cache(self);
-            idx
+            true
         };
-        self.focused_is_x11 = true;
-        self.focused_x11 = idx;
-        self.x11_input_wanted = false;
-        self.x11_focus_pending = false;
-        tracing::info!("X11 {name}: registrada (z-order compositor, input no Wayland)");
+        if is_new {
+            self.sync_app_mru();
+            let foco = self.unified_app_name(self.unified_focus_index());
+            tracing::info!("X11 {name}: registrada em background — foco mantém {foco}");
+        }
         crate::alt_tab::invalidate_cache(self);
     }
 
@@ -98,13 +99,21 @@ impl XwmHandler for State {
         window.output_enter(&self.output, overlap);
         window.refresh();
         if let Some(idx) = self.x11_apps.iter().position(|a| a.surface == window) {
-            if self.focused_is_x11
+            if self.x11_focus_pending
+                && self.focused_is_x11
                 && self.focused_x11 == idx
                 && self.x11_input_wanted
-                && self.x11_focus_pending
             {
                 self.x11_focus_pending = false;
                 self.apply_focus();
+            } else if self.x11_autofocus_idx == Some(idx)
+                && !self.context_menu.open
+                && !self.overlay_open
+                && !self.alt_tab.open
+            {
+                self.x11_autofocus_idx = None;
+                tracing::info!("X11 {name}: primeira map — ativando foco e input");
+                self.focus_x11(idx);
             }
         }
     }

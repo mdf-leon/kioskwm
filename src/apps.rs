@@ -1,6 +1,7 @@
 //! Apps Wayland em execução — foco, nomes e menu de contexto.
 
 use smithay::{
+    desktop::space::SpaceElement,
     input::{
         keyboard::KeyboardTarget,
         pointer::{MotionEvent, PointerTarget},
@@ -63,21 +64,48 @@ pub enum UnifiedApp {
     X11(usize),
 }
 
+/// App visível e que recebe input — fonte única para render e pointer/keyboard.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ActiveTarget {
+    Wayland(usize),
+    X11(usize),
+}
+
 impl crate::state::State {
+    pub fn active_target(&self) -> Option<ActiveTarget> {
+        if self.x11_input_active() {
+            return Some(ActiveTarget::X11(
+                self.focused_x11.min(self.x11_apps.len().saturating_sub(1)),
+            ));
+        }
+        if !self.running_apps.is_empty() {
+            return Some(ActiveTarget::Wayland(
+                self.focused_app.min(self.running_apps.len() - 1),
+            ));
+        }
+        if !self.x11_apps.is_empty() {
+            return Some(ActiveTarget::X11(
+                self.focused_x11.min(self.x11_apps.len() - 1),
+            ));
+        }
+        None
+    }
+
     pub fn app_count(&self) -> usize {
         self.running_apps.len() + self.x11_apps.len()
     }
 
-    /// Menu: X11 primeiro (Krita), depois Wayland (Konsole).
+    /// Menu: Wayland primeiro (Konsole principal), depois X11 (Kate/Krita).
     pub fn unified_app(&self, index: usize) -> Option<UnifiedApp> {
-        if index >= self.app_count() {
+        let wl = self.running_apps.len();
+        let total = wl + self.x11_apps.len();
+        if index >= total {
             return None;
         }
-        let x11 = self.x11_apps.len();
-        if index < x11 {
-            Some(UnifiedApp::X11(index))
+        if index < wl {
+            Some(UnifiedApp::Wayland(index))
         } else {
-            Some(UnifiedApp::Wayland(index - x11))
+            Some(UnifiedApp::X11(index - wl))
         }
     }
 
@@ -153,18 +181,11 @@ impl crate::state::State {
     }
 
     pub fn unified_focus_index(&self) -> usize {
-        if self.focused_is_x11 {
-            let n = self.x11_apps.len();
-            if n == 0 {
-                return 0;
-            }
-            self.focused_x11.min(n - 1)
-        } else {
-            let wl = self.running_apps.len();
-            if wl == 0 {
-                return 0;
-            }
-            self.x11_apps.len() + self.focused_app.min(wl - 1)
+        let wl = self.running_apps.len();
+        match self.active_target() {
+            Some(ActiveTarget::Wayland(i)) => i,
+            Some(ActiveTarget::X11(i)) => wl + i,
+            None => 0,
         }
     }
 
@@ -238,8 +259,9 @@ impl crate::state::State {
         }
     }
 
+    /// Toplevel Wayland que recebe input (popups, ponteiro quando X11 não está ativo).
     pub fn focused_toplevel(&self) -> Option<&ToplevelSurface> {
-        if self.focused_is_x11 {
+        if self.x11_input_active() {
             return None;
         }
         self.running_apps.get(self.focused_app).map(|a| &a.surface)
@@ -249,7 +271,8 @@ impl crate::state::State {
         if index >= self.running_apps.len() {
             return;
         }
-        if !self.focused_is_x11 && self.focused_app == index {
+        if !self.focused_is_x11 && self.focused_app == index && self.x11_input_active() == false {
+            self.apply_focus();
             return;
         }
         if self.focused_is_x11 {
@@ -259,11 +282,13 @@ impl crate::state::State {
         self.focused_is_x11 = false;
         self.x11_input_wanted = false;
         self.x11_focus_pending = false;
+        self.x11_autofocus_idx = None;
         self.focused_app = index;
         self.dismiss_popup_grab();
         self.configure_kiosk(&surface);
         self.touch_mru(self.unified_focus_index());
         self.apply_focus();
+        self.refresh_active_surface();
         crate::context_menu::invalidate_cache(self);
     }
 
@@ -273,21 +298,15 @@ impl crate::state::State {
         }
         if self.focused_is_x11
             && self.focused_x11 == index
-            && self.x11_input_wanted
-            && !self.x11_focus_pending
+            && self.x11_input_active()
         {
             return;
         }
 
-        let prev_x11 = self.focused_is_x11.then_some(self.focused_x11);
-        let had_input = self.x11_input_active();
-        let x11_surface = self.x11_apps[index].surface.clone();
-        let wl_ready = x11_surface.wl_surface().is_some();
-
-        if let Some(prev) = prev_x11 {
-            if prev != index && had_input {
-                self.leave_x11_input();
-            }
+        if self.focused_is_x11 && self.x11_input_active() && self.focused_x11 != index {
+            self.leave_x11_input();
+        } else if !self.x11_input_active() {
+            self.leave_wayland_input();
         }
 
         self.focused_is_x11 = true;
@@ -295,10 +314,11 @@ impl crate::state::State {
         self.x11_input_wanted = true;
         self.dismiss_popup_grab();
 
+        let wl_ready = self.x11_apps[index].surface.wl_surface().is_some();
         if !wl_ready {
             self.x11_focus_pending = true;
             tracing::info!(
-                "X11 {}: aguardando wl_surface (input Wayland até lá)",
+                "X11 {}: aguardando wl_surface",
                 self.x11_apps[index].display_name
             );
             crate::context_menu::invalidate_cache(self);
@@ -306,13 +326,32 @@ impl crate::state::State {
         }
 
         self.x11_focus_pending = false;
-        if !had_input {
-            self.leave_wayland_input();
-        }
-
         self.touch_mru(self.unified_focus_index());
         self.apply_focus();
+        self.refresh_active_surface();
         crate::context_menu::invalidate_cache(self);
+    }
+
+    fn refresh_active_surface(&mut self) {
+        use smithay::utils::{Point, Rectangle, Size};
+        let target = self.active_target();
+        match target {
+            Some(ActiveTarget::Wayland(i)) => {
+                let surface = self.running_apps.get(i).map(|a| a.surface.clone());
+                if let Some(surface) = surface {
+                    self.configure_kiosk(&surface);
+                }
+            }
+            Some(ActiveTarget::X11(i)) => {
+                let x11 = self.x11_apps.get(i).map(|a| a.surface.clone());
+                if let Some(x11) = x11 {
+                    let rect = Rectangle::new(Point::from((0, 0)), Size::from(self.output_size));
+                    let _ = x11.configure(rect);
+                    x11.refresh();
+                }
+            }
+            None => {}
+        }
     }
 
     pub fn sync_app_name(&mut self, surface: &ToplevelSurface) {
@@ -350,11 +389,7 @@ impl crate::state::State {
             return;
         }
         self.deferred_focus = false;
-        if self.focused_is_x11 {
-            self.apply_x11_focus();
-        } else {
-            self.apply_wayland_focus();
-        }
+        self.dispatch_input_focus();
     }
 
     pub fn flush_deferred_focus(&mut self) {
@@ -365,40 +400,45 @@ impl crate::state::State {
         if self.context_menu.open || self.overlay_open || self.alt_tab.open {
             return;
         }
-        if self.focused_is_x11 {
-            self.apply_x11_focus();
-        } else {
-            self.apply_wayland_focus();
-        }
+        self.dispatch_input_focus();
     }
 
-    fn apply_x11_focus(&mut self) {
-        if !self.x11_input_wanted {
+    fn dispatch_input_focus(&mut self) {
+        if self.focused_is_x11 && self.x11_input_wanted {
+            if self.try_apply_x11_focus() {
+                return;
+            }
+            if !self.running_apps.is_empty() {
+                tracing::debug!("X11 pendente — input temporário no Wayland");
+                self.apply_wayland_input(false);
+            }
             return;
         }
+        self.apply_wayland_input(true);
+    }
+
+    fn try_apply_x11_focus(&mut self) -> bool {
         let focused = self.focused_x11;
         let Some(x11_surface) = self.x11_apps.get(focused).map(|a| a.surface.clone()) else {
             self.x11_focus_pending = false;
-            return;
+            return false;
         };
         let name = self.x11_apps[focused].display_name.clone();
-
-        self.dismiss_popup_grab();
-
         let Some(wl_surface) = x11_surface.wl_surface() else {
             self.x11_focus_pending = true;
             tracing::info!("X11 {name}: aguardando wl_surface");
-            return;
+            return false;
         };
 
         self.x11_focus_pending = false;
+        self.dismiss_popup_grab();
         self.leave_wayland_input();
+        let _ = x11_surface.set_activated(true);
 
         let keyboard = self.keyboard.clone();
         let pointer = self.pointer.clone();
         let seat = self.seat.clone();
         let focus_serial = self.next_serial();
-
         keyboard.set_focus(self, Some(wl_surface.clone()), focus_serial);
         let motion = MotionEvent {
             location: self.pointer_pos,
@@ -412,11 +452,17 @@ impl crate::state::State {
             &motion,
         );
         pointer.frame(self);
-        tracing::info!("Input → X11 {name} (wl_surface={})", wl_surface.id());
+        tracing::info!("Foco ativo → X11 {name} (wl={})", wl_surface.id());
+        true
     }
 
-    fn apply_wayland_focus(&mut self) {
-        self.x11_focus_pending = false;
+    /// `clear_x11_intent`: false enquanto X11 está carregando (mantém intenção de foco).
+    fn apply_wayland_input(&mut self, clear_x11_intent: bool) {
+        if clear_x11_intent {
+            self.x11_focus_pending = false;
+            self.x11_input_wanted = false;
+            self.focused_is_x11 = false;
+        }
         self.dismiss_popup_grab();
         let Some(app) = self.running_apps.get(self.focused_app) else {
             self.clear_input_focus();
@@ -440,7 +486,7 @@ impl crate::state::State {
             },
         );
         pointer.frame(self);
-        tracing::info!("Input → Wayland {name}");
+        tracing::info!("Foco ativo → Wayland {name}");
     }
 
     pub fn dismiss_popup_grab(&mut self) {
