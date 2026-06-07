@@ -9,7 +9,7 @@ REPO="${KIOSKWM_REPO:-mdf-leon/kioskwm}"
 BIN_NAME="kioskwm"
 INSTALL_DIR="${KIOSKWM_INSTALL_DIR:-/usr/local/bin}"
 INSTALL_BIN="${INSTALL_DIR}/${BIN_NAME}"
-VERSION="${KIOSKWM_VERSION:-latest}"
+RELEASE="${KIOSKWM_VERSION:-latest}"
 ASSET="kioskwm-x86_64-unknown-linux-gnu"
 BASE_URL="https://github.com/${REPO}/releases"
 
@@ -34,7 +34,7 @@ parse_args() {
     while [ $# -gt 0 ]; do
         case "$1" in
             --version)
-                VERSION="$2"
+                RELEASE="$2"
                 shift 2
                 ;;
             -h | --help)
@@ -124,7 +124,7 @@ download_and_verify() {
     local tag="$1"
     local tmpdir
     tmpdir="$(mktemp -d)"
-    trap 'rm -rf "$tmpdir"' EXIT
+    trap 'rm -rf "${tmpdir:-}"' EXIT
 
     resolve_download_urls "$tag"
     log "baixando ${tag}..."
@@ -156,7 +156,7 @@ main() {
     need_cmd curl
     command -v python3 >/dev/null 2>&1 || die "python3 é necessário para resolver releases"
 
-    local tag="$VERSION"
+    local tag="$RELEASE"
     if [ "$tag" = "latest" ]; then
         tag="$(resolve_latest_tag)"
     fi
