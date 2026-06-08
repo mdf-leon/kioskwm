@@ -38,7 +38,7 @@ fn app_from_env() -> Option<String> {
                     tracing::info!("App via {var}: {app}");
                     return Some(app);
                 }
-                tracing::warn!("{var}={app} definido mas não encontrado no PATH");
+                tracing::warn!("{var}={app} is set but not found in PATH");
             }
         }
     }
@@ -58,7 +58,7 @@ pub fn detect_terminal() -> Option<String> {
 /// Resolve o que lançar na subida: app explícita, auto-detect ou nada (no-spawn silencioso).
 pub fn resolve_spawn(args: &Args) -> SpawnPlan {
     if args.no_spawn {
-        tracing::info!("Modo no-spawn (--no-spawn)");
+        tracing::info!("No-spawn mode (--no-spawn)");
         return SpawnPlan { command: None };
     }
 
@@ -72,7 +72,7 @@ pub fn resolve_spawn(args: &Args) -> SpawnPlan {
             };
         }
         tracing::warn!(
-            "App '{requested}' não encontrada no PATH — continuando sem auto-spawn"
+            "App '{requested}' not found in PATH — continuing without auto-spawn"
         );
         return SpawnPlan { command: None };
     }
@@ -82,14 +82,14 @@ pub fn resolve_spawn(args: &Args) -> SpawnPlan {
     }
 
     if let Some(term) = detect_terminal() {
-        tracing::info!("Auto-spawn: emulador de terminal '{term}'");
+        tracing::info!("Auto-spawn: terminal emulator '{term}'");
         return SpawnPlan {
             command: Some(term),
         };
     }
 
     tracing::info!(
-        "Nenhum emulador de terminal no PATH — modo no-spawn (WAYLAND_DISPLAY aguardando clientes)"
+        "No terminal emulator in PATH — no-spawn mode (waiting for Wayland clients)"
     );
     SpawnPlan { command: None }
 }
@@ -527,7 +527,7 @@ fn apply_wayland_env(cmd: &mut Command, wayland_display: &str) {
 }
 
 pub fn spawn_app(command: &str, wayland_display: &str) {
-    tracing::info!("Lançando app: {} (WAYLAND_DISPLAY={})", command, wayland_display);
+    tracing::info!("Launching app: {} (WAYLAND_DISPLAY={})", command, wayland_display);
 
     let scripts = write_client_env(wayland_display);
     let shell_init = scripts
@@ -587,7 +587,7 @@ pub fn spawn_app(command: &str, wayland_display: &str) {
 
     match cmd.spawn() {
         Ok(_) => tracing::info!("App iniciada: {command}"),
-        Err(err) => tracing::error!("Falha ao iniciar {command}: {err}"),
+        Err(err) => tracing::error!("Failed to start {command}: {err}"),
     }
 }
 

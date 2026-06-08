@@ -16,8 +16,7 @@ use smithay::{
 
 use crate::{
     env_detect,
-    font8x8,
-    settings::{raster::Canvas, theme::Rgba},
+    settings::{raster::Canvas, text, theme::Rgba},
     state::State,
 };
 
@@ -59,34 +58,31 @@ pub fn prepare_element(
         }
     }
 
-    let scale = (output.h / 400).clamp(2, 3);
-    let char_w = 8 * scale;
-    let char_h = 8 * scale;
-    let cols = (output.w / char_w).max(1) as usize;
+    let font_size = (output.h as f32 * 0.022).clamp(13.0, 20.0);
+    let margin = (font_size * 0.85) as i32;
+    let line_h = (font_size * 1.35) as i32;
+    let char_w = text::width("M", font_size, false).max(1);
+    let cols = ((output.w - margin * 2) / char_w).max(1) as usize;
 
     let mut canvas = Canvas::new(output.w, output.h);
     canvas.fill(BG);
 
-    let mut y = char_h;
+    let mut y = margin + line_h;
     let lines = console_lines(cols);
     for line in &lines {
-        let color = if line.ends_with("$ ") {
-            PROMPT
-        } else {
-            TEXT
-        };
-        draw_text8(&mut canvas, char_h, y, scale, line, color);
-        y += char_h;
-        if y + char_h >= output.h {
+        let color = if line.ends_with("$ ") { PROMPT } else { TEXT };
+        text::draw(&mut canvas, margin, y, font_size, line, color);
+        y += line_h;
+        if y + line_h >= output.h {
             break;
         }
     }
 
     if let Some(prompt) = lines.last() {
-        let cursor_x = char_h + prompt.len() as i32 * char_w;
-        let cursor_y = y - char_h;
+        let cursor_x = margin + text::width(prompt, font_size, false);
+        let cursor_y = y - line_h;
         if cursor_y >= 0 {
-            canvas.fill_rect(cursor_x, cursor_y + char_h - scale, char_w, scale, CURSOR);
+            canvas.fill_rect(cursor_x, cursor_y + line_h - 3, char_w, 3, CURSOR);
         }
     }
 
@@ -124,24 +120,6 @@ pub fn prepare_element(
     Ok(Some(elem))
 }
 
-fn draw_text8(c: &mut Canvas, mut x: i32, y: i32, scale: i32, text: &str, color: Rgba) {
-    for ch in text.chars() {
-        draw_glyph8(c, x, y, scale, ch, color);
-        x += 8 * scale;
-    }
-}
-
-fn draw_glyph8(c: &mut Canvas, x: i32, y: i32, scale: i32, ch: char, color: Rgba) {
-    let glyph = font8x8::glyph(ch);
-    for (row, &bits) in glyph.iter().enumerate() {
-        for col in 0..8 {
-            if bits & (1 << col) != 0 {
-                c.fill_rect(x + col * scale, y + row as i32 * scale, scale, scale, color);
-            }
-        }
-    }
-}
-
 fn console_lines(cols: usize) -> Vec<String> {
     let host = read_hostname();
     let user = std::env::var("USER")
@@ -174,18 +152,26 @@ fn console_lines(cols: usize) -> Vec<String> {
 }
 
 fn wrap_line(line: &str, cols: usize) -> Vec<String> {
-    if line.len() <= cols {
+    if line.chars().count() <= cols {
         return vec![line.to_string()];
     }
     let mut out = Vec::new();
     let mut rest = line;
     while !rest.is_empty() {
-        if rest.len() <= cols {
+        if rest.chars().count() <= cols {
             out.push(rest.to_string());
             break;
         }
-        let split = rest[..cols].rfind(' ').unwrap_or(cols);
-        let split = if split == 0 { cols } else { split };
+        let split = rest
+            .char_indices()
+            .nth(cols)
+            .map(|(i, _)| rest[..i].rfind(' ').unwrap_or(i))
+            .unwrap_or(rest.len());
+        let split = if split == 0 {
+            rest.char_indices().nth(cols).map(|(i, _)| i).unwrap_or(rest.len())
+        } else {
+            split
+        };
         out.push(rest[..split].trim_end().to_string());
         rest = rest[split..].trim_start();
     }

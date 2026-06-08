@@ -196,7 +196,11 @@ download_and_verify() {
     (
         cd "$tmpdir"
         need_cmd sha256sum
-        sha256sum -c "${ASSET}.sha256"
+        local expected actual
+        expected="$(awk '{print $1}' "${ASSET}.sha256")"
+        [ -n "$expected" ] || die "invalid checksum file"
+        actual="$(sha256sum "${ASSET}" | awk '{print $1}')"
+        [ "$expected" = "$actual" ] || die "checksum mismatch for ${ASSET}"
     )
 
     as_root install -d "$INSTALL_DIR"

@@ -428,7 +428,7 @@ pub fn run(args: Args, i18n: crate::i18n::I18n) -> Result<(), Box<dyn std::error
     event_loop.run(None, &mut data, |_| {})?;
 
     data.device.pause();
-    tracing::info!("Compositor encerrado — VT liberado");
+    tracing::info!("Compositor stopped — VT released");
 
     Ok(())
 }
@@ -436,8 +436,8 @@ pub fn run(args: Args, i18n: crate::i18n::I18n) -> Result<(), Box<dyn std::error
 fn ensure_tty_env() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::var_os("XDG_RUNTIME_DIR").is_none() {
         return Err(
-            "XDG_RUNTIME_DIR não está definido.\n\
-             Faça login no tty (ex.: tty2) — o pam_systemd cria o diretório automaticamente."
+            "XDG_RUNTIME_DIR is not set.\n\
+             Log in on a TTY (e.g. tty1) — pam_systemd creates it automatically."
                 .into(),
         );
     }

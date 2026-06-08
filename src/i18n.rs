@@ -45,17 +45,13 @@ impl I18n {
         self.lang as u8
     }
 
-    /// CLI `--lang` wins, then `KIOSKWM_LANG`, then `LANG`, else English.
+    /// CLI `--lang` wins, then `KIOSKWM_LANG`. Does not follow LANG (stay English on localized OS).
     pub fn resolve(cli_lang: Option<&str>) -> Self {
         if let Some(s) = cli_lang.filter(|s| !s.is_empty()) {
             return Self::new(parse_lang(s));
         }
         if let Ok(v) = std::env::var("KIOSKWM_LANG") {
             return Self::new(parse_lang(&v));
-        }
-        if let Ok(v) = std::env::var("LANG") {
-            let code = v.split(['_', '.']).next().unwrap_or("en");
-            return Self::new(parse_lang(code));
         }
         Self::new(Lang::En)
     }
