@@ -122,7 +122,8 @@ install_build_deps() {
     as_root DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
         build-essential pkg-config curl git \
         libseat-dev libinput-dev libudev-dev libxkbcommon-dev \
-        libgbm-dev libdrm-dev libegl1-mesa-dev libwayland-dev libsystemd-dev
+        libgbm-dev libdrm-dev libegl1-mesa-dev libwayland-dev libsystemd-dev \
+        libpixman-1-dev
 }
 
 ensure_rust() {
@@ -251,7 +252,7 @@ main() {
         return
     fi
 
-    log "falling back to build from source (matches this glibc)..."
+    warn "no compatible prebuilt binary for this system — compiling from source (~5–15 min, installs Rust once)"
     build_from_source
     verify_install || die "build from source failed"
 }
