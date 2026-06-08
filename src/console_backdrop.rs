@@ -1,4 +1,4 @@
-//! Fundo estilo console Linux quando nenhuma app Wayland/X11 está aberta (modo TTY).
+//! Idle screen on TTY when no Wayland/X11 client is open.
 
 use smithay::{
     backend::{
@@ -17,13 +17,13 @@ use smithay::{
 use crate::{
     env_detect,
     settings::{raster::Canvas, text, theme::Rgba},
+    spawn,
     state::State,
 };
 
 const BG: Rgba = Rgba::new(0, 0, 0, 255);
-const TEXT: Rgba = Rgba::new(204, 204, 204, 255);
-const PROMPT: Rgba = Rgba::new(0, 204, 0, 255);
-const CURSOR: Rgba = Rgba::new(204, 204, 204, 255);
+const TITLE: Rgba = Rgba::new(204, 204, 204, 255);
+const HINT: Rgba = Rgba::new(140, 140, 140, 255);
 
 pub fn wants(state: &State) -> bool {
     state.console_backdrop_enabled
@@ -59,6 +59,7 @@ pub fn prepare_element(
     }
 
     let font_size = (output.h as f32 * 0.022).clamp(13.0, 20.0);
+    let title_size = (font_size * 1.15).min(22.0);
     let margin = (font_size * 0.85) as i32;
     let line_h = (font_size * 1.35) as i32;
     let char_w = text::width("M", font_size, false).max(1);
@@ -68,21 +69,16 @@ pub fn prepare_element(
     canvas.fill(BG);
 
     let mut y = margin + line_h;
-    let lines = console_lines(cols);
-    for line in &lines {
-        let color = if line.ends_with("$ ") { PROMPT } else { TEXT };
-        text::draw(&mut canvas, margin, y, font_size, line, color);
+    for line in idle_lines(cols) {
+        let (size, color) = if y == margin + line_h {
+            (title_size, TITLE)
+        } else {
+            (font_size, HINT)
+        };
+        text::draw(&mut canvas, margin, y, size, &line, color);
         y += line_h;
         if y + line_h >= output.h {
             break;
-        }
-    }
-
-    if let Some(prompt) = lines.last() {
-        let cursor_x = margin + text::width(prompt, font_size, false);
-        let cursor_y = y - line_h;
-        if cursor_y >= 0 {
-            canvas.fill_rect(cursor_x, cursor_y + line_h - 3, char_w, 3, CURSOR);
         }
     }
 
@@ -120,38 +116,34 @@ pub fn prepare_element(
     Ok(Some(elem))
 }
 
-fn console_lines(cols: usize) -> Vec<String> {
+fn idle_lines(cols: usize) -> Vec<String> {
     let host = read_hostname();
-    let user = std::env::var("USER")
-        .or_else(|_| std::env::var("LOGNAME"))
-        .unwrap_or_else(|_| "kiosk".into());
     let tty = env_detect::controlling_tty().unwrap_or_else(|| "tty1".into());
 
-    let mut lines = vec![format!("{host} {tty}"), String::new()];
+    let mut lines = vec![
+        format!("kioskwm on {host} ({tty})"),
+        String::new(),
+        "No application is open.".into(),
+        String::new(),
+        "Ctrl+Alt+F1-F12 switches VT (real shell on another TTY).".into(),
+    ];
 
-    for path in ["/run/motd.dynamic", "/etc/motd"] {
-        if let Ok(content) = std::fs::read_to_string(path) {
-            for line in content.lines() {
-                let t = line.trim_end();
-                if t.is_empty() {
-                    lines.push(String::new());
-                    continue;
-                }
-                for wrapped in wrap_line(t, cols) {
-                    lines.push(wrapped);
-                }
-            }
-        }
-    }
-
-    if lines.last().is_some_and(|l| !l.is_empty()) {
+    if spawn::detect_terminal().is_none() {
         lines.push(String::new());
+        lines.push("Install a Wayland terminal for auto-start, e.g.:".into());
+        lines.push("sudo apt install foot".into());
     }
-    lines.push(format!("{user}@{host}:~$ "));
+
     lines
+        .into_iter()
+        .flat_map(|line| wrap_line(&line, cols))
+        .collect()
 }
 
 fn wrap_line(line: &str, cols: usize) -> Vec<String> {
+    if line.is_empty() {
+        return vec![String::new()];
+    }
     if line.chars().count() <= cols {
         return vec![line.to_string()];
     }
