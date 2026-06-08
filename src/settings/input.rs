@@ -33,6 +33,7 @@ pub fn handle_pointer_button(state: &mut State, pos: Point<f64, smithay::utils::
             state.overlay_open = false;
             reset_on_open(state);
             state.clear_wm_backdrop();
+            state.resync_input_after_overlay();
             state.request_render();
         }
         Hit::AppletMouse => {
@@ -166,6 +167,7 @@ pub fn keyboard_filter(
                 Screen::Main => {
                     state.overlay_open = false;
                     state.clear_wm_backdrop();
+                    state.resync_input_after_overlay();
                 }
                 Screen::Mouse => {
                     state.settings.screen = Screen::Main;

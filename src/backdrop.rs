@@ -48,7 +48,8 @@ pub fn capture_if_needed(
     let mut frame = renderer.render(&mut target, size, transform)?;
     frame.clear(Color32F::new(0.08, 0.08, 0.08, 1.0), &damage)?;
     draw_render_elements::<GlesRenderer, _, _>(&mut frame, 1.0, elements, &damage)?;
-    frame.finish()?.wait()?;
+    frame.finish()?;
+    // Sem .wait() — em virtio/QEMU o fence pode bloquear o loop inteiro (mouse/CAD congelam).
 
     let mapping = renderer.copy_framebuffer(
         &target,

@@ -33,10 +33,12 @@ impl OverlayControl {
     pub fn toggle_now(&self, state: &mut State) {
         state.overlay_open = !state.overlay_open;
         if state.overlay_open {
+            state.suspend_client_keyboard_for_wm_ui();
             input::reset_on_open(state);
             state.invalidate_wm_backdrop();
         } else {
             state.clear_wm_backdrop();
+            state.resync_input_after_overlay();
         }
         tracing::info!(
             "Painel P1 {} (overlay_open={})",
@@ -60,10 +62,12 @@ impl OverlayControl {
         if self.toggle_requested.swap(false, Ordering::SeqCst) {
             state.overlay_open = !state.overlay_open;
             if state.overlay_open {
+                state.suspend_client_keyboard_for_wm_ui();
                 input::reset_on_open(state);
                 state.invalidate_wm_backdrop();
             } else {
                 state.clear_wm_backdrop();
+                state.resync_input_after_overlay();
             }
             tracing::info!(
                 "Painel P1 {} (overlay_open={})",

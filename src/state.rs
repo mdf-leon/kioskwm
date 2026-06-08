@@ -244,9 +244,9 @@ impl State {
         self.alt_tab.open
     }
 
-    /// Overlay/menu WM: usa snapshot congelado em vez de recomposição live.
+    /// Snapshot congelado atrás de menu WM — só no winit; no TTY/QEMU o GPU wait trava o loop.
     pub fn uses_wm_backdrop(&self) -> bool {
-        self.overlay_open || self.context_menu.open
+        !self.draw_compositor_cursor && (self.overlay_open || self.context_menu.open)
     }
 
     pub fn invalidate_wm_backdrop(&mut self) {
@@ -438,6 +438,11 @@ impl State {
                 .get(self.focused_x11)
                 .and_then(|a| a.surface.wl_surface())
             {
+                return Some((wl, Point::from((0.0, 0.0))));
+            }
+        }
+        if let Some(crate::apps::ActiveTarget::X11(i)) = self.active_target() {
+            if let Some(wl) = self.x11_apps.get(i).and_then(|a| a.surface.wl_surface()) {
                 return Some((wl, Point::from((0.0, 0.0))));
             }
         }

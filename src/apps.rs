@@ -655,50 +655,37 @@ impl crate::state::State {
             serial,
             time,
         };
-
-        if self.x11_input_active() {
-            let Some(x11) = self.x11_apps.get(self.focused_x11).map(|a| a.surface.clone()) else {
-                return;
-            };
-            let Some(wl) = x11.wl_surface() else {
-                return;
-            };
-            pointer.motion(
-                self,
-                Some((wl, Point::from((0.0, 0.0)))),
-                &motion,
-            );
-            pointer.frame(self);
-            return;
-        }
-
-        pointer.motion(self, self.pointer_focus(), &motion);
+        let focus = self.pointer_focus();
+        pointer.motion(self, focus, &motion);
         pointer.frame(self);
     }
 
-    /// Entrega clique do ponteiro — X11 via X11Surface (WM_TAKE_FOCUS + wl_pointer).
+    /// Entrega clique do ponteiro — X11 recebe WM_TAKE_FOCUS antes do botão.
     pub fn deliver_pointer_button(&mut self, button: u32, button_state: ButtonState, time: u32) {
+        if button_state == ButtonState::Pressed {
+            if let Some(ActiveTarget::X11(i)) = self.active_target() {
+                if let Some(x11) = self.x11_apps.get(i).map(|a| a.surface.clone()) {
+                    self.sync_x11_keyboard_enter(&x11);
+                }
+            }
+        }
         self.deliver_pointer_motion(time);
 
-        if self.x11_input_active() {
-            let Some(x11) = self.x11_apps.get(self.focused_x11).map(|a| a.surface.clone()) else {
+        if let Some(ActiveTarget::X11(i)) = self.active_target() {
+            if let Some(x11) = self.x11_apps.get(i).map(|a| a.surface.clone()) {
+                let seat = self.seat.clone();
+                let serial = self.next_serial();
+                let event = ButtonEvent {
+                    serial,
+                    time,
+                    button,
+                    state: button_state,
+                };
+                PointerTarget::button(&x11, &seat, self, &event);
+                PointerTarget::frame(&x11, &seat, self);
+                self.pointer.clone().frame(self);
                 return;
-            };
-            if button_state == ButtonState::Pressed {
-                self.sync_x11_keyboard_enter(&x11);
             }
-            let seat = self.seat.clone();
-            let serial = self.next_serial();
-            let event = ButtonEvent {
-                serial,
-                time,
-                button,
-                state: button_state,
-            };
-            PointerTarget::button(&x11, &seat, self, &event);
-            PointerTarget::frame(&x11, &seat, self);
-            self.pointer.clone().frame(self);
-            return;
         }
 
         let pointer = self.pointer.clone();
