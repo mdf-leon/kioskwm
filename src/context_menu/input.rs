@@ -23,6 +23,34 @@ pub fn super_held(state: &State) -> bool {
     )
 }
 
+pub fn right_alt_held(state: &State) -> bool {
+    crate::modifiers::right_alt_held(state.local_right_alt_keys, &state.mod_tracker)
+}
+
+pub fn context_menu_modifier_held(state: &State) -> bool {
+    crate::modifiers::context_menu_modifier_held(
+        state.keyboard.modifier_state().logo,
+        state.local_super_keys,
+        state.local_right_alt_keys,
+        &state.mod_tracker,
+    )
+}
+
+/// Modificadores para menu WM via mouse — evdev só Super (TTY/aninhado), nunca Alt evdev.
+pub fn pointer_context_menu_modifier_held(state: &State) -> bool {
+    let no_evdev = crate::modifiers::ModifierTracker::default();
+    if crate::modifiers::context_menu_modifier_held(
+        state.keyboard.modifier_state().logo,
+        state.local_super_keys,
+        state.local_right_alt_keys,
+        &no_evdev,
+    ) {
+        return true;
+    }
+    // Super físico via evdev (KDE engole teclas no winit); Alt evdev excluído (falso positivo).
+    state.mod_tracker.evdev_super()
+}
+
 pub fn open_at_logical(state: &mut State, x: f64, y: f64) {
     let (ox, oy) = layout::menu_origin(
         x,
@@ -40,6 +68,7 @@ pub fn open_at_logical(state: &mut State, x: f64, y: f64) {
         other => Some(other),
     };
     invalidate_cache(state);
+    state.suspend_client_keyboard_for_wm_ui();
     state.invalidate_wm_backdrop();
     state.note_full_damage();
     state.request_render();

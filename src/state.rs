@@ -17,6 +17,8 @@ pub struct SettingsPanelCache {
 pub struct ContextMenuCache {
     pub buffer: MemoryRenderBuffer,
     pub key: u64,
+    pub width: i32,
+    pub height: i32,
 }
 
 pub struct AltTabCache {
@@ -111,6 +113,8 @@ pub struct State {
     pub pointer: PointerHandle<Self>,
     pub running_apps: Vec<crate::apps::RunningApp>,
     pub x11_apps: Vec<crate::apps::X11App>,
+    /// Menus/tooltips X11 (override-redirect) — ex. menu de contexto do Kate.
+    pub x11_overlays: Vec<smithay::xwayland::X11Surface>,
     pub focused_app: usize,
     pub focused_x11: usize,
     pub focused_is_x11: bool,
@@ -120,6 +124,8 @@ pub struct State {
     pub x11_input_wanted: bool,
     /// Índice X11 recém-aberto — auto-foco só no primeiro map, não em remaps.
     pub x11_autofocus_idx: Option<usize>,
+    /// Splash/fechamento: evita devolver foco ao foot antes da janela principal mapear.
+    pub x11_foot_refocus_at: Option<Instant>,
     /// apply_focus adiado enquanto menu/painel WM estão abertos.
     pub deferred_focus: bool,
     /// App recém-aberta aguardando foco após fechar overlay WM (índice unificado).
@@ -128,6 +134,8 @@ pub struct State {
     pub xwayland_keyboard_grab_state: XWaylandKeyboardGrabState,
     pub xwm: Option<X11Wm>,
     pub x11_display: Option<u32>,
+    /// Calloop XWayland registrado — poll até Ready e enquanto xwm existir.
+    pub xwayland_pending: bool,
     /// Cliente Wayland do XWayland — toplevels dele não vão para running_apps.
     pub xwayland_client: Option<wayland_server::backend::ClientId>,
     pub active_popup: Option<PopupSurface>,
@@ -161,6 +169,8 @@ pub struct State {
     pub mod_tracker: std::sync::Arc<crate::modifiers::ModifierTracker>,
     /// Super keys seen by the compositor keyboard (KDE may not deliver them).
     pub local_super_keys: u8,
+    /// Right Alt only (Alt_R) — opens WM context menu with right-click like Super.
+    pub local_right_alt_keys: u8,
     /// Render agendado — evita busy-loop desenhando só quando necessário.
     render_pending: bool,
     render_deadline: Option<Instant>,
@@ -278,23 +288,17 @@ impl State {
             return;
         }
         self.pointer_flush_pending = false;
-        let pointer = self.pointer.clone();
-        let serial = self.next_serial();
-        let focus = self.pointer_focus();
-        pointer.motion(
-            self,
-            focus,
-            &MotionEvent {
-                location: self.pointer_pos,
-                serial,
-                time: self.pending_pointer_time,
-            },
-        );
-        pointer.frame(self);
+        self.deliver_pointer_motion(self.pending_pointer_time);
     }
 
     pub fn needs_x11_dispatch(&self) -> bool {
-        !self.x11_apps.is_empty() || self.x11_focus_pending
+        // XWayland precisa de poll para Ready, conexão de clientes X11 e eventos de janela.
+        if self.xwayland_pending || self.xwm.is_some() {
+            return true;
+        }
+        self.x11_focus_pending
+            || self.focused_is_x11
+            || !self.x11_apps.is_empty()
     }
 
     pub fn wayland_dispatch_rounds(&self) -> usize {
@@ -313,6 +317,9 @@ impl State {
     pub fn wayland_post_frame_rounds(&self) -> usize {
         if self.active_popup.is_some() {
             return 10;
+        }
+        if self.focused_is_x11 || self.x11_focus_pending {
+            return 6;
         }
         if self.context_menu.open || self.alt_tab.open || self.overlay_open {
             return 4;
@@ -425,18 +432,21 @@ impl State {
             let origin = self.surface_origin_for(&surface);
             return Some((surface, origin));
         }
-        match self.active_target() {
-            Some(crate::apps::ActiveTarget::X11(i)) => {
-                let surface = self.x11_apps.get(i)?.surface.wl_surface()?;
-                Some((surface, Point::from((0.0, 0.0))))
+        if self.x11_input_active() {
+            if let Some(wl) = self
+                .x11_apps
+                .get(self.focused_x11)
+                .and_then(|a| a.surface.wl_surface())
+            {
+                return Some((wl, Point::from((0.0, 0.0))));
             }
-            Some(crate::apps::ActiveTarget::Wayland(i)) => {
-                let surface = self.running_apps.get(i)?.surface.wl_surface().clone();
-                let origin = self.surface_origin_for(&surface);
-                Some((surface, origin))
-            }
-            None => None,
         }
+        if let Some(app) = self.running_apps.get(self.focused_app) {
+            let surface = app.surface.wl_surface().clone();
+            let origin = self.surface_origin_for(&surface);
+            return Some((surface, origin));
+        }
+        None
     }
 
     fn restore_pointer_to_toplevel(&mut self) {
@@ -856,9 +866,12 @@ impl CompositorHandler for State {
         if is_popup {
             Self::log_popup_tree(surface);
         }
+        // note_surface_commit deve ser chamado ANTES de on_commit_buffer_handler,
+        // pois on_commit_buffer_handler consome o buffer com .take() e a checagem
+        // de current().buffer ficaria sempre false se chamada depois.
+        self.note_surface_commit(surface);
         smithay::backend::renderer::utils::on_commit_buffer_handler::<Self>(surface);
         self.popup_manager.commit(surface);
-        self.note_surface_commit(surface);
     }
 }
 
@@ -891,11 +904,16 @@ impl XWaylandKeyboardGrabHandler for State {
         if let Some(keyboard) = seat.get_keyboard() {
             let serial = self.next_serial();
             keyboard.set_grab(self, grab, serial);
-            if !self.context_menu.open && !self.overlay_open && !self.alt_tab.open {
-                self.apply_focus();
-            } else {
+            if self.context_menu.open || self.overlay_open || self.alt_tab.open {
                 self.deferred_focus = true;
+            } else if self.focused_is_x11 && self.x11_input_wanted {
+                if let Some(app) = self.x11_apps.get(self.focused_x11) {
+                    let surface = app.surface.clone();
+                    self.sync_x11_keyboard_enter(&surface);
+                }
+                self.sync_x11_pointer_after_grab();
             }
+            self.request_render();
         }
     }
 
@@ -1011,18 +1029,21 @@ pub fn init_state(
         pointer,
         running_apps: Vec::new(),
         x11_apps: Vec::new(),
+        x11_overlays: Vec::new(),
         focused_app: 0,
         focused_x11: 0,
         focused_is_x11: false,
         x11_focus_pending: false,
         x11_input_wanted: false,
         x11_autofocus_idx: None,
+        x11_foot_refocus_at: None,
         deferred_focus: false,
         pending_autofocus: None,
         xwayland_shell_state: XWaylandShellState::new::<State>(dh),
         xwayland_keyboard_grab_state: XWaylandKeyboardGrabState::new::<State>(dh),
         xwm: None,
         x11_display: None,
+        xwayland_pending: false,
         xwayland_client: None,
         active_popup: None,
         popup_manager: PopupManager::default(),
@@ -1048,6 +1069,7 @@ pub fn init_state(
         i18n,
         mod_tracker,
         local_super_keys: 0,
+        local_right_alt_keys: 0,
         render_pending: true,
         render_deadline: None,
         force_full_damage: true,

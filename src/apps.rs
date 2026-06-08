@@ -1,10 +1,13 @@
 //! Apps Wayland em execução — foco, nomes e menu de contexto.
 
+use std::time::Instant;
+
 use smithay::{
+    backend::input::ButtonState,
     desktop::space::SpaceElement,
     input::{
         keyboard::KeyboardTarget,
-        pointer::{MotionEvent, PointerTarget},
+        pointer::{ButtonEvent, MotionEvent, PointerTarget},
     },
     utils::{Logical, Point},
     wayland::{
@@ -73,10 +76,16 @@ pub enum ActiveTarget {
 
 impl crate::state::State {
     pub fn active_target(&self) -> Option<ActiveTarget> {
-        if self.x11_input_active() {
-            return Some(ActiveTarget::X11(
-                self.focused_x11.min(self.x11_apps.len().saturating_sub(1)),
-            ));
+        if self.focused_is_x11 && self.x11_input_wanted {
+            if !self.x11_apps.is_empty() {
+                return Some(ActiveTarget::X11(
+                    self.focused_x11.min(self.x11_apps.len() - 1),
+                ));
+            }
+            if self.x11_foot_refocus_at.is_some() {
+                // Splash fechou, janela principal ainda não mapeou — tela preta.
+                return None;
+            }
         }
         if !self.running_apps.is_empty() {
             return Some(ActiveTarget::Wayland(
@@ -162,6 +171,7 @@ impl crate::state::State {
         let seat = self.seat.clone();
         let serial = self.next_serial();
         KeyboardTarget::leave(&x11_surface, &seat, self, serial);
+        PointerTarget::leave(&x11_surface, &seat, self, serial, 0);
         let _ = x11_surface.set_activated(false);
     }
 
@@ -183,6 +193,7 @@ impl crate::state::State {
 
     /// Bloqueia teclado dos clientes enquanto overlay WM (Alt+Tab, etc.) está aberto.
     pub fn suspend_client_keyboard_for_wm_ui(&mut self) {
+        self.release_all_keys();
         self.release_keyboard_grab();
         let keyboard = self.keyboard.clone();
         let serial = self.next_serial();
@@ -193,10 +204,6 @@ impl crate::state::State {
     pub fn resync_input_after_overlay(&mut self) {
         self.deferred_focus = false;
         self.dismiss_popup_grab();
-        self.release_keyboard_grab();
-        let keyboard = self.keyboard.clone();
-        let serial = self.next_serial();
-        keyboard.set_focus(self, None, serial);
         if let Some(idx) = self.pending_autofocus.take() {
             if self.wm_ui_blocks_focus() {
                 self.pending_autofocus = Some(idx);
@@ -204,6 +211,19 @@ impl crate::state::State {
                 self.focus_unified(idx);
             }
         }
+        if self.keyboard.is_grabbed() && self.focused_is_x11 && self.x11_input_wanted {
+            if let Some(app) = self.x11_apps.get(self.focused_x11) {
+                let surface = app.surface.clone();
+                self.sync_x11_keyboard_enter(&surface);
+            }
+            self.sync_x11_pointer_after_grab();
+            self.push_modifiers_to_focus();
+            self.refresh_active_surface();
+            return;
+        }
+        let keyboard = self.keyboard.clone();
+        let serial = self.next_serial();
+        keyboard.set_focus(self, None, serial);
         self.dispatch_input_focus();
         self.refresh_active_surface();
         self.push_modifiers_to_focus();
@@ -211,6 +231,28 @@ impl crate::state::State {
 
     pub fn wm_ui_blocks_focus(&self) -> bool {
         self.context_menu.open || self.overlay_open || self.alt_tab.open
+    }
+
+    /// Após unmap do splash (ou fechar Krita), devolve foco ao foot só se nada mapear a tempo.
+    pub fn tick_x11_foot_refocus(&mut self) {
+        let Some(deadline) = self.x11_foot_refocus_at else {
+            return;
+        };
+        if Instant::now() < deadline {
+            return;
+        }
+        self.x11_foot_refocus_at = None;
+        if !self.x11_apps.is_empty() {
+            return;
+        }
+        tracing::info!("X11 encerrado — voltando ao terminal");
+        self.focused_is_x11 = false;
+        self.x11_input_wanted = false;
+        self.x11_focus_pending = false;
+        if !self.running_apps.is_empty() {
+            self.focused_app = self.focused_app.min(self.running_apps.len() - 1);
+        }
+        self.apply_focus();
     }
 
     /// Foca app recém-aberta; adia se menu/overlay WM estiver aberto.
@@ -234,6 +276,25 @@ impl crate::state::State {
         keyboard.unset_grab(self);
     }
 
+    /// Evita tecla repetindo no cliente após Alt+Tab/menu WM (release perdido).
+    pub fn release_all_keys(&mut self) {
+        use smithay::backend::input::KeyState;
+        use smithay::input::keyboard::FilterResult;
+
+        let keyboard = self.keyboard.clone();
+        let keys: Vec<_> = keyboard.pressed_keys().into_iter().collect();
+        if keys.is_empty() {
+            return;
+        }
+        tracing::debug!("Liberando {} tecla(s) presa(s) no compositor", keys.len());
+        for key in keys {
+            let serial = self.next_serial();
+            keyboard.input::<(), _>(self, key, KeyState::Released, serial, 0, |_, _, _| {
+                FilterResult::Forward
+            });
+        }
+    }
+
     fn sync_keyboard_enter(&mut self, surface: &WlSurface) {
         let keyboard = self.keyboard.clone();
         let seat = self.seat.clone();
@@ -246,7 +307,7 @@ impl crate::state::State {
     }
 
     /// X11 (Kate/Krita): precisa de WM_TAKE_FOCUS, não só wl_keyboard.enter.
-    fn sync_x11_keyboard_enter(&mut self, x11_surface: &X11Surface) {
+    pub(crate) fn sync_x11_keyboard_enter(&mut self, x11_surface: &X11Surface) {
         let keyboard = self.keyboard.clone();
         let seat = self.seat.clone();
         let mods = keyboard.modifier_state();
@@ -369,6 +430,7 @@ impl crate::state::State {
             self.configure_toplevel(&old, false);
         }
         if self.focused_is_x11 {
+            self.release_all_keys();
             self.leave_x11_input();
         }
         let surface = self.running_apps[index].surface.clone();
@@ -398,6 +460,7 @@ impl crate::state::State {
         }
 
         if self.focused_is_x11 && self.x11_input_active() && self.focused_x11 != index {
+            self.release_all_keys();
             self.leave_x11_input();
         } else if !self.x11_input_active() {
             self.leave_wayland_input();
@@ -406,6 +469,7 @@ impl crate::state::State {
         self.focused_is_x11 = true;
         self.focused_x11 = index;
         self.x11_input_wanted = true;
+        self.x11_foot_refocus_at = None;
         self.dismiss_popup_grab();
 
         let wl_ready = self.x11_apps[index].surface.wl_surface().is_some();
@@ -415,6 +479,9 @@ impl crate::state::State {
                 "X11 {}: aguardando wl_surface",
                 self.x11_apps[index].display_name
             );
+            self.apply_wayland_input(false);
+            self.note_full_damage();
+            self.request_render();
             crate::context_menu::invalidate_cache(self);
             return;
         }
@@ -503,17 +570,37 @@ impl crate::state::State {
     }
 
     fn dispatch_input_focus(&mut self) {
-        self.release_keyboard_grab();
+        self.dismiss_popup_grab();
+
+        if self.keyboard.is_grabbed() {
+            if self.focused_is_x11 && self.x11_input_wanted {
+                if let Some(app) = self.x11_apps.get(self.focused_x11) {
+                    let surface = app.surface.clone();
+                    self.sync_x11_keyboard_enter(&surface);
+                }
+                self.sync_x11_pointer_after_grab();
+            } else if !self.focused_is_x11 {
+                self.apply_wayland_input(true);
+            }
+            return;
+        }
+
+        if self.focused_is_x11 && self.x11_input_wanted && self.x11_apps.is_empty() {
+            self.focused_is_x11 = false;
+            self.x11_input_wanted = false;
+            self.x11_focus_pending = false;
+            self.x11_foot_refocus_at = None;
+        }
+
         if self.focused_is_x11 && self.x11_input_wanted {
             if self.try_apply_x11_focus() {
                 return;
             }
-            if !self.running_apps.is_empty() {
-                tracing::debug!("X11 pendente — input temporário no Wayland");
-                self.apply_wayland_input(false);
-            }
+            // X11 carregando — foot responde (não zerar ponteiro).
+            self.apply_wayland_input(false);
             return;
         }
+
         self.apply_wayland_input(true);
     }
 
@@ -532,21 +619,22 @@ impl crate::state::State {
 
         self.x11_focus_pending = false;
         self.dismiss_popup_grab();
-        self.leave_wayland_input();
         let _ = x11_surface.set_activated(true);
+        x11_surface.refresh();
+        let overlap = smithay::utils::Rectangle::from_size(self.output_size);
+        x11_surface.output_enter(&self.output, overlap);
 
         let keyboard = self.keyboard.clone();
         let pointer = self.pointer.clone();
-        let seat = self.seat.clone();
         let focus_serial = self.next_serial();
         keyboard.set_focus(self, Some(wl_surface.clone()), focus_serial);
+        // WM_TAKE_FOCUS + wl_keyboard.enter (Kate precisa disto para cliques/teclado X11).
         self.sync_x11_keyboard_enter(&x11_surface);
         let motion = MotionEvent {
             location: self.pointer_pos,
             serial: self.next_serial(),
             time: 0,
         };
-        PointerTarget::enter(&wl_surface, &seat, self, &motion);
         pointer.motion(
             self,
             Some((wl_surface.clone(), Point::from((0.0, 0.0)))),
@@ -555,6 +643,99 @@ impl crate::state::State {
         pointer.frame(self);
         tracing::info!("Foco ativo → X11 {name} (wl={})", wl_surface.id());
         true
+    }
+
+    /// Entrega movimento do ponteiro ao cliente focado (Wayland ou X11).
+    pub fn deliver_pointer_motion(&mut self, time: u32) {
+        let pointer = self.pointer.clone();
+        let location = self.pointer_pos;
+        let serial = self.next_serial();
+        let motion = MotionEvent {
+            location,
+            serial,
+            time,
+        };
+
+        if self.x11_input_active() {
+            let Some(x11) = self.x11_apps.get(self.focused_x11).map(|a| a.surface.clone()) else {
+                return;
+            };
+            let Some(wl) = x11.wl_surface() else {
+                return;
+            };
+            pointer.motion(
+                self,
+                Some((wl, Point::from((0.0, 0.0)))),
+                &motion,
+            );
+            pointer.frame(self);
+            return;
+        }
+
+        pointer.motion(self, self.pointer_focus(), &motion);
+        pointer.frame(self);
+    }
+
+    /// Entrega clique do ponteiro — X11 via X11Surface (WM_TAKE_FOCUS + wl_pointer).
+    pub fn deliver_pointer_button(&mut self, button: u32, button_state: ButtonState, time: u32) {
+        self.deliver_pointer_motion(time);
+
+        if self.x11_input_active() {
+            let Some(x11) = self.x11_apps.get(self.focused_x11).map(|a| a.surface.clone()) else {
+                return;
+            };
+            if button_state == ButtonState::Pressed {
+                self.sync_x11_keyboard_enter(&x11);
+            }
+            let seat = self.seat.clone();
+            let serial = self.next_serial();
+            let event = ButtonEvent {
+                serial,
+                time,
+                button,
+                state: button_state,
+            };
+            PointerTarget::button(&x11, &seat, self, &event);
+            PointerTarget::frame(&x11, &seat, self);
+            self.pointer.clone().frame(self);
+            return;
+        }
+
+        let pointer = self.pointer.clone();
+        let serial = self.next_serial();
+        pointer.button(
+            self,
+            &ButtonEvent {
+                serial,
+                time,
+                button,
+                state: button_state,
+            },
+        );
+        pointer.frame(self);
+    }
+
+    /// Ponteiro para X11 quando o cliente pediu keyboard grab (não soltar o grab).
+    pub fn sync_x11_pointer_after_grab(&mut self) {
+        let idx = self.focused_x11;
+        let Some(x11_surface) = self.x11_apps.get(idx).map(|a| a.surface.clone()) else {
+            return;
+        };
+        let Some(wl_surface) = x11_surface.wl_surface() else {
+            return;
+        };
+        let pointer = self.pointer.clone();
+        let motion = MotionEvent {
+            location: self.pointer_pos,
+            serial: self.next_serial(),
+            time: 0,
+        };
+        pointer.motion(
+            self,
+            Some((wl_surface, Point::from((0.0, 0.0)))),
+            &motion,
+        );
+        pointer.frame(self);
     }
 
     /// `clear_x11_intent`: false enquanto X11 está carregando (mantém intenção de foco).
@@ -573,17 +754,14 @@ impl crate::state::State {
         let name = app.display_name.clone();
         let keyboard = self.keyboard.clone();
         let pointer = self.pointer.clone();
-        let seat = self.seat.clone();
         let focus_serial = self.next_serial();
         keyboard.set_focus(self, Some(wl_surface.clone()), focus_serial);
-        self.sync_keyboard_enter(&wl_surface);
         let origin = self.surface_origin_for(&wl_surface);
         let motion = MotionEvent {
             location: self.pointer_pos,
             serial: self.next_serial(),
             time: 0,
         };
-        PointerTarget::enter(&wl_surface, &seat, self, &motion);
         pointer.motion(self, Some((wl_surface, origin)), &motion);
         pointer.frame(self);
         tracing::info!("Foco ativo → Wayland {name}");

@@ -62,17 +62,17 @@ pub fn prepare_menu(
 
 fn rebuild_cache_if_needed(state: &mut State) -> Result<(), Box<dyn std::error::Error>> {
     let key = cache_key(state);
+    let (mw, mh) = layout::menu_size(state.app_count());
     {
         let guard = state.context_menu_cache.lock().unwrap();
-        if guard.as_ref().is_some_and(|c| c.key == key) {
+        if guard.as_ref().is_some_and(|c| c.key == key && c.width == mw && c.height == mh) {
             return Ok(());
         }
     }
 
-    let (mw, mh) = layout::menu_size(state.app_count());
     let mut canvas = Canvas::new(mw, mh);
     paint_menu(&mut canvas, state);
-    upload_pixels(state, &canvas, key);
+    upload_pixels(state, &canvas, key, mw, mh);
     Ok(())
 }
 
@@ -143,17 +143,18 @@ fn paint_menu(c: &mut Canvas, state: &State) {
     );
 }
 
-fn upload_pixels(state: &mut State, canvas: &Canvas, key: u64) {
-    let (mw, mh) = layout::menu_size(state.app_count());
+fn upload_pixels(state: &mut State, canvas: &Canvas, key: u64, mw: i32, mh: i32) {
     let mut guard = state.context_menu_cache.lock().unwrap();
     if let Some(cache) = guard.as_mut() {
-        let mut ctx = cache.buffer.render();
-        let _ = ctx.draw(|buf| {
-            buf.copy_from_slice(&canvas.pixels);
-            Ok::<_, std::convert::Infallible>(vec![Rectangle::from_size(Size::from((mw, mh)))])
-        });
-        cache.key = key;
-        return;
+        if cache.width == mw && cache.height == mh {
+            let mut ctx = cache.buffer.render();
+            let _ = ctx.draw(|buf| {
+                buf.copy_from_slice(&canvas.pixels);
+                Ok::<_, std::convert::Infallible>(vec![Rectangle::from_size(Size::from((mw, mh)))])
+            });
+            cache.key = key;
+            return;
+        }
     }
 
     let mut buffer = MemoryRenderBuffer::new(
@@ -170,7 +171,12 @@ fn upload_pixels(state: &mut State, canvas: &Canvas, key: u64) {
             Ok::<_, std::convert::Infallible>(vec![Rectangle::from_size(Size::from((mw, mh)))])
         });
     }
-    *guard = Some(crate::state::ContextMenuCache { buffer, key });
+    *guard = Some(crate::state::ContextMenuCache {
+        buffer,
+        key,
+        width: mw,
+        height: mh,
+    });
 }
 
 fn cache_key(state: &State) -> u64 {
@@ -187,7 +193,5 @@ fn cache_key(state: &State) -> u64 {
 }
 
 pub fn invalidate_cache(state: &mut State) {
-    if let Some(cache) = state.context_menu_cache.lock().unwrap().as_mut() {
-        cache.key = u64::MAX;
-    }
+    *state.context_menu_cache.lock().unwrap() = None;
 }

@@ -1,4 +1,4 @@
-//! Painel P1 (Ctrl+Alt+Del / Ctrl+Shift+Esc / Super+Esc) — menu estilo Ajustes do macOS.
+//! Painel P1 (Ctrl+Alt+Del / Ctrl+Shift+Esc / Super+Esc / Super+Del) — menu estilo Ajustes do macOS.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 

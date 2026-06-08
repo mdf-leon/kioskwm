@@ -140,8 +140,13 @@ fn find_output(device: &DrmDevice) -> Result<OutputConfig, Box<dyn std::error::E
     Err("nenhum monitor conectado encontrado".into())
 }
 
+fn poll_x11_if_needed(data: &mut TtyLoop) {
+    crate::x11::dispatch_if_needed(&mut data.x11_loop, &mut data.state);
+}
+
 fn request_render(handle: &LoopHandle<'_, TtyLoop>) {
     let _ = handle.insert_source(Timer::from_duration(Duration::from_millis(8)), |_, _, data| {
+        poll_x11_if_needed(data);
         if data.state.take_render_pending() {
             data.render_frame();
         }
@@ -151,6 +156,7 @@ fn request_render(handle: &LoopHandle<'_, TtyLoop>) {
 
 fn request_render_immediate(handle: &LoopHandle<'_, TtyLoop>) {
     let _ = handle.insert_source(Timer::immediate(), |_, _, data| {
+        poll_x11_if_needed(data);
         if data.state.take_render_pending() {
             data.render_frame();
         }
@@ -291,7 +297,7 @@ pub fn run(args: Args, i18n: crate::i18n::I18n) -> Result<(), Box<dyn std::error
     state.register_dmabuf_formats(renderer_formats.clone());
 
     let mut x11_loop = crate::x11::make_event_loop();
-    crate::x11::start(&x11_loop.handle(), &dh);
+    crate::x11::start(&x11_loop.handle(), &dh, &mut state);
 
     let listener = bind_wayland_socket()?;
     let socket_name = listener

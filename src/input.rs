@@ -5,7 +5,6 @@ use smithay::{
         AbsolutePositionEvent, ButtonState, Event, InputBackend, InputEvent,
         KeyboardKeyEvent, PointerAxisEvent, PointerButtonEvent, PointerMotionEvent,
     },
-    input::pointer::{ButtonEvent, MotionEvent},
     utils::{Logical, Point},
 };
 
@@ -37,7 +36,6 @@ impl PointerTracker {
 
 fn deliver_pointer_motion(
     state: &mut State,
-    pointer: &smithay::input::pointer::PointerHandle<State>,
     location: Point<f64, Logical>,
     time: u32,
 ) {
@@ -45,32 +43,9 @@ fn deliver_pointer_motion(
         return;
     }
     state.pointer_pos = location;
-    send_motion(state, pointer, location, time);
+    state.deliver_pointer_motion(time);
     // Redraw contínuo — antes só renderizava no clique ou no cursor do compositor (TTY).
     state.request_render_debounced(Duration::from_millis(8));
-}
-
-fn send_motion(
-    state: &mut State,
-    pointer: &smithay::input::pointer::PointerHandle<State>,
-    location: Point<f64, Logical>,
-    time: u32,
-) {
-    if state.overlay_open || state.context_menu.open || state.alt_tab.open {
-        return;
-    }
-    let serial = state.next_serial();
-    let focus = state.pointer_focus();
-    pointer.motion(
-        state,
-        focus,
-        &MotionEvent {
-            location,
-            serial,
-            time,
-        },
-    );
-    pointer.frame(state);
 }
 
 /// Simula clique direito na posição atual do cursor (só para debug).
@@ -80,37 +55,15 @@ pub fn debug_right_click(state: &mut State, tracker: &PointerTracker) {
         tracker.pos.x,
         tracker.pos.y
     );
-    let pointer = state.pointer.clone();
     let time = 0u32;
-    send_motion(state, &pointer, tracker.pos, time);
-
-    let press_serial = state.next_serial();
-    tracing::info!("DEBUG: botão direito press serial={press_serial:?}");
-    pointer.button(
-        state,
-        &ButtonEvent {
-            serial: press_serial,
-            time,
-            button: 273,
-            state: ButtonState::Pressed,
-        },
-    );
-    pointer.frame(state);
+    state.deliver_pointer_motion(time);
+    tracing::info!("DEBUG: botão direito press");
+    state.deliver_pointer_button(273, ButtonState::Pressed, time);
 
     thread::sleep(Duration::from_millis(150));
 
-    let release_serial = state.next_serial();
-    tracing::info!("DEBUG: botão direito release serial={release_serial:?}");
-    pointer.button(
-        state,
-        &ButtonEvent {
-            serial: release_serial,
-            time,
-            button: 273,
-            state: ButtonState::Released,
-        },
-    );
-    pointer.frame(state);
+    tracing::info!("DEBUG: botão direito release");
+    state.deliver_pointer_button(273, ButtonState::Released, time);
 }
 
 pub fn handle_input<B: InputBackend>(
@@ -167,7 +120,7 @@ pub fn handle_input<B: InputBackend>(
                     state.request_render_debounced(Duration::from_millis(16));
                 }
             } else {
-                deliver_pointer_motion(state, &pointer, tracker.pos, event.time() as u32);
+                deliver_pointer_motion(state, tracker.pos, event.time() as u32);
             }
         }
         InputEvent::PointerMotionAbsolute { event } => {
@@ -185,7 +138,7 @@ pub fn handle_input<B: InputBackend>(
                     state.request_render_debounced(Duration::from_millis(16));
                 }
             } else {
-                deliver_pointer_motion(state, &pointer, tracker.pos, event.time() as u32);
+                deliver_pointer_motion(state, tracker.pos, event.time() as u32);
             }
         }
         InputEvent::PointerButton { event } => {
@@ -221,34 +174,46 @@ pub fn handle_input<B: InputBackend>(
                 return;
             }
 
+            if state.focused_is_x11
+                && state.x11_input_wanted
+                && !state.x11_input_active()
+                && event.button_code() == BTN_LEFT
+                && event.state() == ButtonState::Pressed
+            {
+                state.apply_focus();
+            }
+
             if event.button_code() == BTN_RIGHT
                 && event.state() == ButtonState::Pressed
-                && crate::context_menu::handlers::super_held(state)
+                && crate::context_menu::handlers::pointer_context_menu_modifier_held(state)
             {
+                tracing::info!(
+                    "Menu WM: clique direito em ({:.0}, {:.0})",
+                    tracker.pos.x,
+                    tracker.pos.y
+                );
                 crate::context_menu::handlers::open_at(state, tracker.pos);
                 state.request_render();
                 return;
             }
             let time = event.time() as u32;
-            tracing::debug!(
-                "botão {} {:?} em ({:.0}, {:.0})",
-                event.button_code(),
-                event.state(),
-                state.pointer_pos.x,
-                state.pointer_pos.y
-            );
-            send_motion(state, &pointer, state.pointer_pos, time);
-            let serial = state.next_serial();
-            pointer.button(
-                state,
-                &ButtonEvent {
-                    serial,
-                    time,
-                    button: event.button_code(),
-                    state: event.state(),
-                },
-            );
-            pointer.frame(state);
+            if event.button_code() == BTN_RIGHT {
+                tracing::debug!(
+                    "clique direito {:?} → cliente em ({:.0}, {:.0})",
+                    event.state(),
+                    state.pointer_pos.x,
+                    state.pointer_pos.y,
+                );
+            } else {
+                tracing::debug!(
+                    "botão {} {:?} em ({:.0}, {:.0})",
+                    event.button_code(),
+                    event.state(),
+                    state.pointer_pos.x,
+                    state.pointer_pos.y
+                );
+            }
+            state.deliver_pointer_button(event.button_code(), event.state(), time);
             state.request_render();
         }
         InputEvent::PointerAxis { event } => {

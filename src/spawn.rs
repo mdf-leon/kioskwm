@@ -303,7 +303,7 @@ fn write_client_env(wayland_display: &str) -> Option<ClientEnvScripts> {
         .map(|n| format!("export DISPLAY=':{n}'\n"))
         .unwrap_or_else(|| "unset DISPLAY\n".into());
     let base_content = format!(
-        r#"# Gerado pelo kioskwm — env base.
+        r#"# Gerado pelo kioskwm — env base (sem Qt/GDK — snaps quebram com wayland forçado).
 export WAYLAND_DISPLAY='{wd}'
 export XDG_SESSION_TYPE=wayland
 {display_line}unset WAYLAND_SOCKET
@@ -348,7 +348,7 @@ if [ -x /usr/bin/kate ]; then
     echo "kioskwm: XWayland ainda não iniciou — aguarde o log DISPLAY=:N" >&2
     exit 1
   fi
-  exec env -u WAYLAND_DISPLAY DISPLAY=":$xd" QT_QPA_PLATFORM=xcb /usr/bin/kate "$@"
+  exec env -u WAYLAND_DISPLAY -u GDK_BACKEND -u MOZ_ENABLE_WAYLAND DISPLAY=":$xd" QT_QPA_PLATFORM=xcb /usr/bin/kate "$@"
 fi
 echo "kioskwm: kate não encontrado — sudo apt install kate" >&2
 exit 1
@@ -357,7 +357,7 @@ exit 1
 
     let krita = dir.join("krita");
     let krita_body = r#"#!/bin/sh
-# kioskwm: apt krita → Wayland; snap krita → XWayland (DISPLAY=:N).
+# kioskwm: deb krita → Wayland; snap krita → XWayland (DISPLAY=:N).
 rt="${XDG_RUNTIME_DIR:?}"
 wd="${WAYLAND_DISPLAY:-$(cat "$rt/kioskwm-active" 2>/dev/null)}"
 xd="$(cat "$rt/kioskwm-x11-display" 2>/dev/null)"
@@ -370,17 +370,64 @@ if [ -z "$wd" ]; then
   echo "kioskwm: compositor não detectado — inicie o kioskwm primeiro" >&2
   exit 1
 fi
-if [ -x /usr/bin/krita ]; then
+krita_via_snap() {
+  command -v snap >/dev/null 2>&1 && snap list krita 2>/dev/null | grep -q '^krita '
+}
+launch_snap_krita() {
+  if [ -z "$xd" ]; then
+    echo "kioskwm: XWayland ainda não iniciou — aguarde o log DISPLAY=:N no /tmp/kioskwm.log" >&2
+    exit 1
+  fi
+  echo "kioskwm: krita via XWayland (DISPLAY=:$xd)" >&2
+  exec env -u WAYLAND_DISPLAY -u GDK_BACKEND -u MOZ_ENABLE_WAYLAND -u QT_QPA_PLATFORM \
+    -u SDL_VIDEODRIVER DISPLAY=":$xd" QT_QPA_PLATFORM=xcb XDG_SESSION_TYPE=x11 \
+    snap run krita "$@"
+}
+launch_deb_krita() {
+  echo "kioskwm: krita deb via Wayland ($wd)" >&2
   exec env -u DISPLAY WAYLAND_DISPLAY="$wd" QT_QPA_PLATFORM=wayland GDK_BACKEND=wayland \
     /usr/bin/krita "$@"
+}
+# Snap sempre XWayland — nunca tentar Wayland nativo no snap.
+if krita_via_snap; then
+  launch_snap_krita
 fi
-if [ -z "$xd" ]; then
-  echo "kioskwm: XWayland ainda não iniciou — aguarde o log DISPLAY=:N" >&2
-  exit 1
+if [ -x /usr/bin/krita ]; then
+  case "$(readlink -f /usr/bin/krita 2>/dev/null)" in
+    *snap*) launch_snap_krita ;;
+    *) launch_deb_krita ;;
+  esac
 fi
-exec env -u WAYLAND_DISPLAY DISPLAY=":$xd" QT_QPA_PLATFORM=xcb snap run krita "$@"
+echo "kioskwm: krita não encontrado — sudo apt install krita  ou  snap install krita" >&2
+exit 1
 "#;
     write_executable(&krita, krita_body)?;
+
+    let firefox = dir.join("firefox");
+    let firefox_body = r#"#!/bin/sh
+# kioskwm: Firefox — Wayland nativo; snap cai em XWayland (DISPLAY=:N).
+rt="${XDG_RUNTIME_DIR:?}"
+wd="${WAYLAND_DISPLAY:-$(cat "$rt/kioskwm-active" 2>/dev/null)}"
+xd="$(cat "$rt/kioskwm-x11-display" 2>/dev/null)"
+if [ -z "$wd" ]; then
+  echo "kioskwm: compositor não detectado — inicie o kioskwm primeiro" >&2
+  exit 1
+fi
+[ -f "$rt/kioskwm-client-env.sh" ] && . "$rt/kioskwm-client-env.sh"
+[ -f "$rt/kioskwm-qt-env.sh" ] && . "$rt/kioskwm-qt-env.sh"
+if command -v firefox >/dev/null 2>&1; then
+  exec firefox "$@"
+fi
+if command -v firefox-esr >/dev/null 2>&1; then
+  exec firefox-esr "$@"
+fi
+if [ -n "$xd" ] && command -v snap >/dev/null 2>&1; then
+  exec env -u WAYLAND_DISPLAY DISPLAY=":$xd" MOZ_ENABLE_WAYLAND=0 snap run firefox "$@"
+fi
+echo "kioskwm: firefox não encontrado — sudo apt install firefox" >&2
+exit 1
+"#;
+    write_executable(&firefox, firefox_body)?;
     Some(dir)
 }
 
@@ -407,19 +454,26 @@ fn write_zsh_wrapper(scripts: &ClientEnvScripts, bin_dir: Option<&Path>) -> Opti
         let b = bin.trim_end_matches('/');
         format!(
             "kate() {{ \"{b}/kate\" \"$@\"; }}\n\
-             krita() {{ \"{b}/krita\" \"$@\"; }}\n",
+             krita() {{ \"{b}/krita\" \"$@\"; }}\n\
+             firefox() {{ \"{b}/firefox\" \"$@\"; }}\n",
         )
+    };
+    let bin_path = kioskwm_bin_path_prefix().unwrap_or_default();
+    let path_export = if bin_path.is_empty() {
+        String::new()
+    } else {
+        format!("export PATH='{}'\n", escape_shell(&bin_path))
     };
     let content = format!(
         r#"# kioskwm — profile intacto; env base reaplicado sem Qt (snaps).
 export KIOSKWM_ENV='{base}'
 export KIOSKWM_QT_ENV='{qt}'
-unset ZDOTDIR
+{path_export}unset ZDOTDIR
 [ -f "$HOME/.zshenv" ] && source "$HOME/.zshenv"
 [ -f "$HOME/.zshrc" ] && source "$HOME/.zshrc"
 [ -f "$KIOSKWM_ENV" ] && source "$KIOSKWM_ENV"
 {app_fns}
-unalias kate krita 2>/dev/null
+unalias kate krita firefox 2>/dev/null
 kioskwm_reapply_env() {{ [ -f "$KIOSKWM_ENV" ] && source "$KIOSKWM_ENV"; }}
 precmd_functions+=(kioskwm_reapply_env)
 [[ -z "$KIOSKWM_BANNER" ]] && KIOSKWM_BANNER=1 && \
@@ -427,6 +481,7 @@ precmd_functions+=(kioskwm_reapply_env)
 "#,
         base = base,
         qt = qt,
+        path_export = path_export,
         app_fns = app_fns,
     );
     fs::write(&path, content).ok()?;
@@ -442,18 +497,28 @@ fn write_bash_wrapper(scripts: &ClientEnvScripts, bin_dir: Option<&Path>) -> Opt
         .map(|p| {
             format!(
                 "kate() {{ '{}/kate' \"$@\"; }}\n\
-                 krita() {{ '{}/krita' \"$@\"; }}\n",
+                 krita() {{ '{}/krita' \"$@\"; }}\n\
+                 firefox() {{ '{}/firefox' \"$@\"; }}\n",
+                p.display(),
                 p.display(),
                 p.display()
             )
         })
         .unwrap_or_default();
+    let bin_path = kioskwm_bin_path_prefix().unwrap_or_default();
+    let path_export = if bin_path.is_empty() {
+        String::new()
+    } else {
+        format!("export PATH='{}'\n", escape_shell(&bin_path))
+    };
     let content = format!(
         r#"# kioskwm — profile intacto; env base sem Qt para snaps.
 export KIOSKWM_ENV='{base}'
 export KIOSKWM_QT_ENV='{qt}'
-[ -f "$HOME/.bashrc" ] && . "$HOME/.bashrc"
+{path_export}[ -f "$HOME/.bashrc" ] && . "$HOME/.bashrc"
 [ -f "$KIOSKWM_ENV" ] && . "$KIOSKWM_ENV"
+kioskwm_reapply_env() {{ [ -f "$KIOSKWM_ENV" ] && . "$KIOSKWM_ENV"; }}
+PROMPT_COMMAND="kioskwm_reapply_env${{PROMPT_COMMAND:+; $PROMPT_COMMAND}}"
 {app_fns}"#,
         base = base,
         qt = qt,
@@ -515,15 +580,48 @@ exec '{shell}' -i
     Some(path)
 }
 
+fn prepend_kioskwm_bin_path(cmd: &mut Command) {
+    if let Some(dir) = runtime_dir() {
+        let bin = dir.join("kioskwm-bin");
+        if bin.is_dir() {
+            let path =
+                std::env::var("PATH").unwrap_or_else(|_| "/usr/local/bin:/usr/bin:/bin".into());
+            cmd.env("PATH", format!("{}:{path}", bin.display()));
+        }
+    }
+}
+
+fn kioskwm_bin_path_prefix() -> Option<String> {
+    let dir = runtime_dir()?.join("kioskwm-bin");
+    if !dir.is_dir() {
+        return None;
+    }
+    let path = std::env::var("PATH").unwrap_or_else(|_| "/usr/local/bin:/usr/bin:/bin".into());
+    Some(format!("{}:{path}", dir.display()))
+}
+
+fn wrapper_binary(name: &str) -> Option<PathBuf> {
+    let dir = runtime_dir()?.join("kioskwm-bin");
+    let path = dir.join(name);
+    path.is_file().then_some(path)
+}
+
+/// Só socket Wayland + PATH dos wrappers — sem Qt/GDK (snaps quebram com wayland forçado).
 fn apply_wayland_env(cmd: &mut Command, wayland_display: &str) {
     cmd.env("WAYLAND_DISPLAY", wayland_display)
-        .env("QT_QPA_PLATFORM", "wayland")
-        .env("GDK_BACKEND", "wayland")
-        .env("SDL_VIDEODRIVER", "wayland")
-        .env("MOZ_ENABLE_WAYLAND", "1")
         .env("XDG_SESSION_TYPE", "wayland")
         .env_remove("DISPLAY")
         .env_remove("WAYLAND_SOCKET");
+    prepend_kioskwm_bin_path(cmd);
+}
+
+fn command_for_spawn(binary: &str) -> Command {
+    if let Some(wrapper) = wrapper_binary(binary) {
+        tracing::info!("Usando wrapper kioskwm: {}", wrapper.display());
+        Command::new(wrapper)
+    } else {
+        Command::new(binary)
+    }
 }
 
 pub fn spawn_app(command: &str, wayland_display: &str) {
@@ -569,6 +667,13 @@ pub fn spawn_app(command: &str, wayland_display: &str) {
         "foot" => {
             let mut c = Command::new("foot");
             c.args(&extra_args);
+            if let Some(init) = &shell_init {
+                c.arg("-e").arg(init);
+            } else if let Some(s) = &scripts {
+                let shell = user_shell();
+                let cmdline = format!(". '{}'; exec '{shell}' -i", s.base.display());
+                c.arg("-e").arg(&shell).arg("-c").arg(cmdline);
+            }
             c
         }
         "kitty" => {
@@ -577,7 +682,7 @@ pub fn spawn_app(command: &str, wayland_display: &str) {
             c
         }
         other => {
-            let mut c = Command::new(other);
+            let mut c = command_for_spawn(other);
             c.args(&extra_args);
             c
         }

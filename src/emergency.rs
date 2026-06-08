@@ -1,6 +1,6 @@
 //! Prioridades de atalho:
 //! - P0: cursor sempre por cima; Ctrl+Alt+Shift+Del encerra; Ctrl+Alt+F1–F12 ou Ctrl+Alt+0–9 troca VT.
-//! - P1: Ctrl+Alt+Del, Ctrl+Shift+Esc ou Super+Esc (painel) — interceptado no compositor antes dos clientes.
+//! - P1: Ctrl+Alt+Del, Ctrl+Shift+Esc, Super+Esc ou Super+Del (painel) — interceptado no compositor antes dos clientes.
 
 use std::{
     process::Command,
@@ -26,7 +26,7 @@ use crate::{
 pub enum EmergencyAction {
     /// P0: encerrar compositor (Ctrl+Alt+Shift+Del)
     ForceQuit,
-    /// P1: painel (Ctrl+Alt+Del, Ctrl+Shift+Esc ou Super+Esc)
+    /// P1: painel (Ctrl+Alt+Del, Ctrl+Shift+Esc, Super+Esc ou Super+Del)
     ToggleOverlay,
     /// P0: troca de VT (Ctrl+Alt+F1–F12 ou Ctrl+Alt+0–9)
     SwitchVt(u8),
@@ -76,6 +76,10 @@ pub fn match_combo(modifiers: &ModifiersState, keysym: &KeysymHandle<'_>) -> Opt
     let sym = keysym.modified_sym().raw();
 
     if modifiers.logo && is_escape(sym) {
+        return Some(EmergencyAction::ToggleOverlay);
+    }
+
+    if modifiers.logo && is_delete(sym) {
         return Some(EmergencyAction::ToggleOverlay);
     }
 
@@ -282,23 +286,37 @@ pub fn do_vt_switch(vt: u8) {
 
 }
 
-fn track_super_key(
+fn track_modifier_keys(
     state: &mut State,
     keysym: &KeysymHandle<'_>,
     key_state: smithay::backend::input::KeyState,
 ) {
     use smithay::backend::input::KeyState;
 
-    let is_super = keysym
-        .raw_syms()
-        .iter()
-        .any(|s| matches!(s.raw(), keysyms::KEY_Super_L | keysyms::KEY_Super_R));
-    if !is_super {
-        return;
-    }
-    match key_state {
-        KeyState::Pressed => state.local_super_keys = state.local_super_keys.saturating_add(1),
-        KeyState::Released => state.local_super_keys = state.local_super_keys.saturating_sub(1),
+    for sym in keysym.raw_syms() {
+        match sym.raw() {
+            k if k == keysyms::KEY_Super_L as u32 || k == keysyms::KEY_Super_R as u32 => match key_state
+            {
+                KeyState::Pressed => state.local_super_keys = state.local_super_keys.saturating_add(1),
+                KeyState::Released => {
+                    state.local_super_keys = state.local_super_keys.saturating_sub(1)
+                }
+            },
+            k if k == keysyms::KEY_Alt_R as u32
+                || k == keysyms::KEY_ISO_Level3_Shift as u32
+                || k == keysyms::KEY_ISO_Level3_Latch as u32 =>
+            {
+                match key_state {
+                    KeyState::Pressed => {
+                        state.local_right_alt_keys = state.local_right_alt_keys.saturating_add(1)
+                    }
+                    KeyState::Released => {
+                        state.local_right_alt_keys = state.local_right_alt_keys.saturating_sub(1)
+                    }
+                }
+            }
+            _ => {}
+        }
     }
 }
 
@@ -313,7 +331,7 @@ pub fn compositor_keyboard_filter(
 ) -> FilterResult<()> {
     use smithay::backend::input::KeyState;
 
-    track_super_key(state, &keysym, key_state);
+    track_modifier_keys(state, &keysym, key_state);
 
     // Alt+F4 — fechar app em foco (padrão KDE/Plasma).
     if key_state == KeyState::Pressed
@@ -388,6 +406,9 @@ pub fn match_evdev(
     const KEY_F1: u16 = 59;
     const KEY_F12: u16 = 70;
     if code == KEY_ESC && meta {
+        return Some(EmergencyAction::ToggleOverlay);
+    }
+    if code == KEY_DELETE && meta && !ctrl && !alt {
         return Some(EmergencyAction::ToggleOverlay);
     }
     if !ctrl {

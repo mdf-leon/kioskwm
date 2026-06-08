@@ -27,7 +27,8 @@ impl Default for ContextMenuState {
 
 pub mod handlers {
     pub use super::input::{
-        handle_pointer_button, handle_pointer_motion, keyboard_filter, open_at,
-        open_at_logical, super_held,
+        close, handle_pointer_button, handle_pointer_motion, keyboard_filter, open_at,
+        open_at_logical, context_menu_modifier_held, pointer_context_menu_modifier_held,
+        right_alt_held, super_held,
     };
 }

@@ -47,6 +47,11 @@ pub fn send_frame_callbacks(state: &mut State, time: u32) {
             {
                 send_frames_surface_tree(&wl, time);
             }
+            for overlay in &state.x11_overlays {
+                if let Some(wl) = overlay.wl_surface() {
+                    send_frames_surface_tree(&wl, time);
+                }
+            }
         }
         None => {}
     }
@@ -298,6 +303,20 @@ fn collect_app_elements(
                         renderer,
                         &wl,
                         (0, 0),
+                        1.0,
+                        1.0,
+                        Kind::Unspecified,
+                    ));
+                }
+            }
+            for overlay in &state.x11_overlays {
+                if let Some(wl) = overlay.wl_surface() {
+                    let geo = overlay.geometry();
+                    let _ = import_surface_tree(renderer, &wl);
+                    popup_elements.extend(render_elements_from_surface_tree(
+                        renderer,
+                        &wl,
+                        (geo.loc.x, geo.loc.y),
                         1.0,
                         1.0,
                         Kind::Unspecified,

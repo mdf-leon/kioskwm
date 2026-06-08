@@ -55,7 +55,7 @@ pub fn run(args: Args, i18n: I18n) -> Result<(), Box<dyn std::error::Error>> {
 
     let mut event_loop = crate::x11::make_event_loop();
     let loop_handle = event_loop.handle();
-    crate::x11::start(&loop_handle, &dh);
+    crate::x11::start(&loop_handle, &dh, &mut state);
 
     let listener = bind_wayland_socket()?;
     let socket_name = listener

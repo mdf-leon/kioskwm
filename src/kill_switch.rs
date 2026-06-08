@@ -28,6 +28,7 @@ struct InputEvent {
 struct EvdevMods {
     ctrl: bool,
     alt: bool,
+    right_alt: bool,
     shift: bool,
     meta: bool,
 }
@@ -35,6 +36,7 @@ struct EvdevMods {
 struct ScancodeMods {
     ctrl: bool,
     alt: bool,
+    right_alt: bool,
     shift: bool,
     meta: bool,
 }
@@ -73,12 +75,14 @@ fn kill_switch_thread(
     let mut evdev_mods = EvdevMods {
         ctrl: false,
         alt: false,
+        right_alt: false,
         shift: false,
         meta: false,
     };
     let mut scan_mods = ScancodeMods {
         ctrl: false,
         alt: false,
+        right_alt: false,
         shift: false,
         meta: false,
     };
@@ -148,8 +152,13 @@ fn kill_switch_thread(
                 }
                 update_evdev_mods(&mut evdev_mods, ev.code, ev.value != 0);
                 mod_tracker.set_evdev_super(evdev_mods.meta);
+                mod_tracker.set_evdev_right_alt(evdev_mods.right_alt);
 
-                if ev.code == BTN_RIGHT && ev.value == 1 && evdev_mods.meta {
+                if !nested
+                    && ev.code == BTN_RIGHT
+                    && ev.value == 1
+                    && (evdev_mods.meta || evdev_mods.right_alt)
+                {
                     let (x, y) = hardware.pointer();
                     ctx.menu.request_open(x, y);
                     continue;
@@ -219,7 +228,8 @@ fn dispatch_hardware(action: EmergencyAction, ctx: &EmergencyContext) {
 fn update_evdev_mods(mods: &mut EvdevMods, code: u16, pressed: bool) {
     match code {
         29 | 97 => mods.ctrl = pressed,
-        56 | 100 => mods.alt = pressed,
+        56 => mods.alt = pressed,
+        92 | 100 => mods.right_alt = pressed, // ISO_Level3_Shift / AltGr + Alt_R
         42 | 54 => mods.shift = pressed,
         125 | 126 => mods.meta = pressed,
         _ => {}
@@ -235,6 +245,10 @@ fn match_scancode(
     if byte & 0x80 != 0 {
         match byte & 0x7F {
             0x1D | 0x9D => mods.ctrl = false,
+            0x38 | 0xB8 if extended => {
+                mods.right_alt = false;
+                mod_tracker.set_evdev_right_alt(false);
+            }
             0x38 | 0xB8 => mods.alt = false,
             0x2A | 0x36 => mods.shift = false,
             0x5B | 0x5C if extended => {
@@ -248,6 +262,11 @@ fn match_scancode(
     match byte {
         0x1D | 0x9D => {
             mods.ctrl = true;
+            None
+        }
+        0x38 | 0xB8 if extended => {
+            mods.right_alt = true;
+            mod_tracker.set_evdev_right_alt(true);
             None
         }
         0x38 | 0xB8 => {
@@ -270,6 +289,8 @@ fn match_scancode(
             if mods.ctrl && mods.alt && mods.shift {
                 Some(EmergencyAction::ForceQuit)
             } else if mods.ctrl && mods.alt {
+                Some(EmergencyAction::ToggleOverlay)
+            } else if mods.meta && !mods.ctrl && !mods.alt {
                 Some(EmergencyAction::ToggleOverlay)
             } else {
                 None

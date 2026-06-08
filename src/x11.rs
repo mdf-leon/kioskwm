@@ -1,6 +1,9 @@
 //! XWayland — apps X11 (Krita snap, etc.) como no COSMIC/anvil.
 
-use std::process::Stdio;
+use std::{
+    process::Stdio,
+    time::{Duration, Instant},
+};
 
 use smithay::{
     delegate_xwayland_shell,
@@ -70,7 +73,9 @@ impl XwmHandler for State {
 
     fn new_window(&mut self, _xwm: XwmId, _window: X11Surface) {}
 
-    fn new_override_redirect_window(&mut self, _xwm: XwmId, _window: X11Surface) {}
+    fn new_override_redirect_window(&mut self, _xwm: XwmId, window: X11Surface) {
+        let _ = window.set_mapped(true);
+    }
 
     fn map_window_request(&mut self, _xwm: XwmId, window: X11Surface) {
         let name = window_title(&window);
@@ -88,6 +93,7 @@ impl XwmHandler for State {
                 display_name: name.clone(),
             });
             self.x11_autofocus_idx = Some(idx);
+            self.x11_foot_refocus_at = None;
             crate::context_menu::invalidate_cache(self);
             true
         };
@@ -131,19 +137,24 @@ impl XwmHandler for State {
         }
     }
 
-    fn mapped_override_redirect_window(&mut self, _xwm: XwmId, _window: X11Surface) {}
+    fn mapped_override_redirect_window(&mut self, _xwm: XwmId, window: X11Surface) {
+        self.track_x11_overlay(window);
+    }
 
     fn unmapped_window(&mut self, _xwm: XwmId, window: X11Surface) {
+        if window.is_override_redirect() {
+            self.untrack_x11_overlay(&window);
+            return;
+        }
         self.x11_apps.retain(|a| a.surface != window);
         if self.x11_apps.is_empty() {
-            if self.focused_is_x11 {
-                self.focused_is_x11 = false;
-                self.x11_input_wanted = false;
-                self.x11_focus_pending = false;
-                if !self.running_apps.is_empty() {
-                    self.focused_app = self.focused_app.min(self.running_apps.len() - 1);
-                }
-                self.apply_focus();
+            if self.focused_is_x11 || self.x11_input_wanted {
+                self.x11_focus_pending = true;
+                self.x11_foot_refocus_at =
+                    Some(Instant::now() + Duration::from_millis(250));
+                tracing::info!("X11 sem janelas — aguardando nova janela ou retorno ao terminal");
+                self.note_full_damage();
+                self.request_render();
             }
             return;
         }
@@ -153,6 +164,9 @@ impl XwmHandler for State {
     }
 
     fn destroyed_window(&mut self, _xwm: XwmId, window: X11Surface) {
+        if window.is_override_redirect() {
+            self.untrack_x11_overlay(&window);
+        }
         let before = self.x11_apps.len();
         self.x11_apps.retain(|a| a.surface != window);
         if self.x11_apps.len() < before {
@@ -187,10 +201,21 @@ impl XwmHandler for State {
     fn configure_notify(
         &mut self,
         _xwm: XwmId,
-        _window: X11Surface,
+        window: X11Surface,
         _geometry: Rectangle<i32, Logical>,
         _above: Option<smithay::xwayland::xwm::X11Window>,
     ) {
+        let geo = Rectangle::new(
+            Point::from((0, 0)),
+            Size::from(self.output_size),
+        );
+        let _ = window.configure(geo);
+        window.refresh();
+        if let Some(idx) = self.x11_apps.iter().position(|a| a.surface == window) {
+            if self.focused_is_x11 && self.focused_x11 == idx {
+                self.apply_focus();
+            }
+        }
     }
 
     fn property_notify(
@@ -256,11 +281,37 @@ impl XwmHandler for State {
 
 delegate_xwayland_shell!(State);
 
+impl State {
+    pub(crate) fn track_x11_overlay(&mut self, window: X11Surface) {
+        if self.x11_overlays.iter().any(|w| w == &window) {
+            window.refresh();
+            self.request_render();
+            return;
+        }
+        let _ = window.configure(None);
+        let overlap = Rectangle::from_size(self.output_size);
+        window.output_enter(&self.output, overlap);
+        window.refresh();
+        self.x11_overlays.push(window);
+        tracing::debug!("X11 overlay mapeado ({} total)", self.x11_overlays.len());
+        self.request_render();
+    }
+
+    pub(crate) fn untrack_x11_overlay(&mut self, window: &X11Surface) {
+        let before = self.x11_overlays.len();
+        self.x11_overlays.retain(|w| w != window);
+        if self.x11_overlays.len() != before {
+            tracing::debug!("X11 overlay removido ({} restantes)", self.x11_overlays.len());
+            self.request_render();
+        }
+    }
+}
+
 fn window_title(window: &X11Surface) -> String {
     crate::apps::short_name(&window.title())
 }
 
-pub fn start(handle: &calloop::LoopHandle<'static, State>, dh: &DisplayHandle) {
+pub fn start(handle: &calloop::LoopHandle<'static, State>, dh: &DisplayHandle, state: &mut State) {
     let loop_handle = handle.clone();
     let (xwayland, client) = match XWayland::spawn(
         dh,
@@ -283,6 +334,7 @@ pub fn start(handle: &calloop::LoopHandle<'static, State>, dh: &DisplayHandle) {
             x11_socket,
             display_number,
         } => {
+            data.xwayland_pending = false;
             data.client_compositor_state(&client).set_client_scale(1.0);
             match X11Wm::start_wm(loop_handle.clone(), x11_socket, client.clone()) {
                 Ok(wm) => {
@@ -290,15 +342,21 @@ pub fn start(handle: &calloop::LoopHandle<'static, State>, dh: &DisplayHandle) {
                     data.x11_display = Some(display_number);
                     data.xwayland_client = Some(client.id());
                     spawn::set_x11_display(display_number);
+                    data.request_render();
                     tracing::info!("XWayland :{display_number} pronto (apps snap/xcb)");
                 }
                 Err(err) => tracing::error!("X11Wm falhou: {err}"),
             }
         }
-        XWaylandEvent::Error => tracing::error!("XWayland falhou ao iniciar"),
+        XWaylandEvent::Error => {
+            data.xwayland_pending = false;
+            tracing::error!("XWayland falhou ao iniciar");
+        }
     }) {
         tracing::error!("Event loop XWayland: {err}");
+        return;
     }
+    state.xwayland_pending = true;
 }
 
 pub fn make_event_loop() -> EventLoop<'static, State> {
@@ -333,4 +391,5 @@ pub fn dispatch(loop_: &mut EventLoop<'static, State>, state: &mut State) {
             state.apply_focus();
         }
     }
+    state.tick_x11_foot_refocus();
 }
