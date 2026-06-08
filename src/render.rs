@@ -141,7 +141,11 @@ pub fn render_kiosk_frame(
 
     let damage = compute_frame_damage(state, size);
     let full_damage = true;
-    let skip_live_apps = state.wm_ui_obscures_apps() || state.uses_wm_backdrop();
+    // TTY/QEMU: sem backdrop GPU (fence virtio trava o loop). Com overlay aberto,
+    // não compõe apps por baixo — scrim + painel ficam visíveis sobre fundo escuro.
+    let skip_live_apps = state.wm_ui_obscures_apps()
+        || state.uses_wm_backdrop()
+        || (state.overlay_open && state.draw_compositor_cursor);
 
     let mut toplevel_elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> = Vec::new();
     let mut popup_elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> = Vec::new();
@@ -220,9 +224,15 @@ pub fn render_kiosk_frame(
     } else if let Some(bg) = console_bg {
         draw_render_elements::<GlesRenderer, _, _>(&mut frame, 1.0, &[bg], &damage)?;
         draw_render_elements::<GlesRenderer, _, _>(&mut frame, 1.0, &elements, &damage)?;
+        if let Some(scrim) = overlay_scrim {
+            draw_render_elements::<GlesRenderer, _, _>(&mut frame, 1.0, &[scrim], &damage)?;
+        }
     } else {
         frame.clear(clear_color, &damage)?;
         draw_render_elements::<GlesRenderer, _, _>(&mut frame, 1.0, &elements, &damage)?;
+        if let Some(scrim) = overlay_scrim {
+            draw_render_elements::<GlesRenderer, _, _>(&mut frame, 1.0, &[scrim], &damage)?;
+        }
     }
 
     if let Some(overlay) = alt_tab_overlay {

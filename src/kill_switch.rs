@@ -89,11 +89,19 @@ fn kill_switch_thread(
     let mut extended = false;
 
     let input_devices = open_input_devices();
-    let use_tty_fallback = input_devices.is_empty();
+    // No TTY o libinput do compositor já trata P0/P1; K_MEDIUMRAW no VT quebra
+    // teclado/modificadores em QEMU/VM quando o thread não tem grupo input.
+    let use_tty_fallback = input_devices.is_empty() && !env_detect::on_hardware_tty();
 
     let tty = if use_tty_fallback {
         open_controlling_tty()
     } else {
+        if input_devices.is_empty() && env_detect::on_hardware_tty() {
+            tracing::info!(
+                "Fallback evdev sem /dev/input — atalhos via libinput do compositor \
+                 (adicione seu usuário ao grupo 'input' para fallback evdev extra)"
+            );
+        }
         None
     };
     if let Some(ref t) = &tty {
