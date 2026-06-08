@@ -124,7 +124,7 @@ pub fn handle_input<B: InputBackend>(
             }
         }
         InputEvent::PointerMotionAbsolute { event } => {
-            let pos = Point::<f64, Logical>::from((event.x(), event.y()));
+            let pos = event.position_transformed(state.output_size);
             tracker.pos = pos;
             tracker.clamp(state.output_size);
             state.pointer_pos = tracker.pos;
