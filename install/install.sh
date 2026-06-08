@@ -106,6 +106,7 @@ install_runtime_deps() {
         libwacom9
         libevdev2
         xwayland
+        foot
     )
     for mtdev in libmtdev1t64 libmtdev1; do
         if apt-cache show "$mtdev" >/dev/null 2>&1; then

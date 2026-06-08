@@ -1,4 +1,4 @@
-//! Fundo estilo console Linux quando nenhuma app Wayland/X11 está aberta (modo TTY).
+//! Idle screen on TTY when no Wayland/X11 client is open.
 
 use smithay::{
     backend::{
@@ -16,15 +16,14 @@ use smithay::{
 
 use crate::{
     env_detect,
-    font8x8,
-    settings::{raster::Canvas, theme::Rgba},
+    settings::{raster::Canvas, text, theme::Rgba},
+    spawn,
     state::State,
 };
 
 const BG: Rgba = Rgba::new(0, 0, 0, 255);
-const TEXT: Rgba = Rgba::new(204, 204, 204, 255);
-const PROMPT: Rgba = Rgba::new(0, 204, 0, 255);
-const CURSOR: Rgba = Rgba::new(204, 204, 204, 255);
+const TITLE: Rgba = Rgba::new(204, 204, 204, 255);
+const HINT: Rgba = Rgba::new(140, 140, 140, 255);
 
 pub fn wants(state: &State) -> bool {
     state.console_backdrop_enabled
@@ -59,34 +58,27 @@ pub fn prepare_element(
         }
     }
 
-    let scale = (output.h / 400).clamp(2, 3);
-    let char_w = 8 * scale;
-    let char_h = 8 * scale;
-    let cols = (output.w / char_w).max(1) as usize;
+    let font_size = (output.h as f32 * 0.022).clamp(13.0, 20.0);
+    let title_size = (font_size * 1.15).min(22.0);
+    let margin = (font_size * 0.85) as i32;
+    let line_h = (font_size * 1.35) as i32;
+    let char_w = text::width("M", font_size, false).max(1);
+    let cols = ((output.w - margin * 2) / char_w).max(1) as usize;
 
     let mut canvas = Canvas::new(output.w, output.h);
     canvas.fill(BG);
 
-    let mut y = char_h;
-    let lines = console_lines(cols);
-    for line in &lines {
-        let color = if line.ends_with("$ ") {
-            PROMPT
+    let mut y = margin + line_h;
+    for line in idle_lines(cols) {
+        let (size, color) = if y == margin + line_h {
+            (title_size, TITLE)
         } else {
-            TEXT
+            (font_size, HINT)
         };
-        draw_text8(&mut canvas, char_h, y, scale, line, color);
-        y += char_h;
-        if y + char_h >= output.h {
+        text::draw(&mut canvas, margin, y, size, &line, color);
+        y += line_h;
+        if y + line_h >= output.h {
             break;
-        }
-    }
-
-    if let Some(prompt) = lines.last() {
-        let cursor_x = char_h + prompt.len() as i32 * char_w;
-        let cursor_y = y - char_h;
-        if cursor_y >= 0 {
-            canvas.fill_rect(cursor_x, cursor_y + char_h - scale, char_w, scale, CURSOR);
         }
     }
 
@@ -124,68 +116,54 @@ pub fn prepare_element(
     Ok(Some(elem))
 }
 
-fn draw_text8(c: &mut Canvas, mut x: i32, y: i32, scale: i32, text: &str, color: Rgba) {
-    for ch in text.chars() {
-        draw_glyph8(c, x, y, scale, ch, color);
-        x += 8 * scale;
-    }
-}
-
-fn draw_glyph8(c: &mut Canvas, x: i32, y: i32, scale: i32, ch: char, color: Rgba) {
-    let glyph = font8x8::glyph(ch);
-    for (row, &bits) in glyph.iter().enumerate() {
-        for col in 0..8 {
-            if bits & (1 << col) != 0 {
-                c.fill_rect(x + col * scale, y + row as i32 * scale, scale, scale, color);
-            }
-        }
-    }
-}
-
-fn console_lines(cols: usize) -> Vec<String> {
+fn idle_lines(cols: usize) -> Vec<String> {
     let host = read_hostname();
-    let user = std::env::var("USER")
-        .or_else(|_| std::env::var("LOGNAME"))
-        .unwrap_or_else(|_| "kiosk".into());
     let tty = env_detect::controlling_tty().unwrap_or_else(|| "tty1".into());
 
-    let mut lines = vec![format!("{host} {tty}"), String::new()];
+    let mut lines = vec![
+        format!("kioskwm on {host} ({tty})"),
+        String::new(),
+        "No application is open.".into(),
+        String::new(),
+        "Ctrl+Alt+F1-F12 switches VT (real shell on another TTY).".into(),
+    ];
 
-    for path in ["/run/motd.dynamic", "/etc/motd"] {
-        if let Ok(content) = std::fs::read_to_string(path) {
-            for line in content.lines() {
-                let t = line.trim_end();
-                if t.is_empty() {
-                    lines.push(String::new());
-                    continue;
-                }
-                for wrapped in wrap_line(t, cols) {
-                    lines.push(wrapped);
-                }
-            }
-        }
-    }
-
-    if lines.last().is_some_and(|l| !l.is_empty()) {
+    if spawn::detect_terminal().is_none() {
         lines.push(String::new());
+        lines.push("Install a Wayland terminal for auto-start, e.g.:".into());
+        lines.push("sudo apt install foot".into());
     }
-    lines.push(format!("{user}@{host}:~$ "));
+
     lines
+        .into_iter()
+        .flat_map(|line| wrap_line(&line, cols))
+        .collect()
 }
 
 fn wrap_line(line: &str, cols: usize) -> Vec<String> {
-    if line.len() <= cols {
+    if line.is_empty() {
+        return vec![String::new()];
+    }
+    if line.chars().count() <= cols {
         return vec![line.to_string()];
     }
     let mut out = Vec::new();
     let mut rest = line;
     while !rest.is_empty() {
-        if rest.len() <= cols {
+        if rest.chars().count() <= cols {
             out.push(rest.to_string());
             break;
         }
-        let split = rest[..cols].rfind(' ').unwrap_or(cols);
-        let split = if split == 0 { cols } else { split };
+        let split = rest
+            .char_indices()
+            .nth(cols)
+            .map(|(i, _)| rest[..i].rfind(' ').unwrap_or(i))
+            .unwrap_or(rest.len());
+        let split = if split == 0 {
+            rest.char_indices().nth(cols).map(|(i, _)| i).unwrap_or(rest.len())
+        } else {
+            split
+        };
         out.push(rest[..split].trim_end().to_string());
         rest = rest[split..].trim_start();
     }
