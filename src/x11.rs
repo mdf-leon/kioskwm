@@ -282,6 +282,47 @@ impl XwmHandler for State {
 delegate_xwayland_shell!(State);
 
 impl State {
+    /// Override-redirect (menu de contexto GTK, tooltip) sob o cursor — prioridade no ponteiro.
+    pub(crate) fn topmost_x11_overlay_at(
+        &self,
+        pos: Point<f64, Logical>,
+    ) -> Option<X11Surface> {
+        let x = pos.x.floor() as i32;
+        let y = pos.y.floor() as i32;
+        for overlay in self.x11_overlays.iter().rev() {
+            let geo = overlay.geometry();
+            if geo.size.w <= 0 || geo.size.h <= 0 {
+                continue;
+            }
+            if geo.loc.x <= x
+                && x < geo.loc.x + geo.size.w
+                && geo.loc.y <= y
+                && y < geo.loc.y + geo.size.h
+                && overlay.wl_surface().is_some()
+            {
+                return Some(overlay.clone());
+            }
+        }
+        None
+    }
+
+    /// Superfície X11 que recebe clique/movimento — overlay OR ou toplevel focado.
+    pub(crate) fn pointer_x11_surface(&self) -> Option<X11Surface> {
+        if let Some(overlay) = self.topmost_x11_overlay_at(self.pointer_pos) {
+            return Some(overlay);
+        }
+        if self.x11_input_active() {
+            return self
+                .x11_apps
+                .get(self.focused_x11)
+                .map(|a| a.surface.clone());
+        }
+        if let Some(crate::apps::ActiveTarget::X11(i)) = self.active_target() {
+            return self.x11_apps.get(i).map(|a| a.surface.clone());
+        }
+        None
+    }
+
     pub(crate) fn track_x11_overlay(&mut self, window: X11Surface) {
         if self.x11_overlays.iter().any(|w| w == &window) {
             window.refresh();

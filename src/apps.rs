@@ -663,29 +663,40 @@ impl crate::state::State {
     /// Entrega clique do ponteiro — X11 recebe WM_TAKE_FOCUS antes do botão.
     pub fn deliver_pointer_button(&mut self, button: u32, button_state: ButtonState, time: u32) {
         if button_state == ButtonState::Pressed {
-            if let Some(ActiveTarget::X11(i)) = self.active_target() {
-                if let Some(x11) = self.x11_apps.get(i).map(|a| a.surface.clone()) {
+            if let Some(x11) = self.pointer_x11_surface() {
+                if !x11.is_override_redirect() {
                     self.sync_x11_keyboard_enter(&x11);
                 }
             }
         }
         self.deliver_pointer_motion(time);
 
-        if let Some(ActiveTarget::X11(i)) = self.active_target() {
-            if let Some(x11) = self.x11_apps.get(i).map(|a| a.surface.clone()) {
-                let seat = self.seat.clone();
-                let serial = self.next_serial();
-                let event = ButtonEvent {
-                    serial,
-                    time,
-                    button,
-                    state: button_state,
-                };
-                PointerTarget::button(&x11, &seat, self, &event);
-                PointerTarget::frame(&x11, &seat, self);
-                self.pointer.clone().frame(self);
-                return;
+        let x11 = self.pointer_x11_surface().or_else(|| {
+            // Menu GTK (OR): release do botão direito no frame do map às vezes
+            // não passa no hit-test — manda pro overlay mais recente.
+            const BTN_RIGHT: u32 = 0x111;
+            if button != BTN_RIGHT || button_state != ButtonState::Released {
+                return None;
             }
+            self.x11_overlays.last().and_then(|o| {
+                let geo = o.geometry();
+                (geo.size.w > 0 && geo.size.h > 0 && o.wl_surface().is_some()).then(|| o.clone())
+            })
+        });
+
+        if let Some(x11) = x11 {
+            let seat = self.seat.clone();
+            let serial = self.next_serial();
+            let event = ButtonEvent {
+                serial,
+                time,
+                button,
+                state: button_state,
+            };
+            PointerTarget::button(&x11, &seat, self, &event);
+            PointerTarget::frame(&x11, &seat, self);
+            self.pointer.clone().frame(self);
+            return;
         }
 
         let pointer = self.pointer.clone();

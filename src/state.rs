@@ -432,6 +432,15 @@ impl State {
             let origin = self.surface_origin_for(&surface);
             return Some((surface, origin));
         }
+        if let Some(overlay) = self.topmost_x11_overlay_at(self.pointer_pos) {
+            if let Some(wl) = overlay.wl_surface() {
+                let geo = overlay.geometry();
+                return Some((
+                    wl,
+                    Point::from((geo.loc.x as f64, geo.loc.y as f64)),
+                ));
+            }
+        }
         if self.x11_input_active() {
             if let Some(wl) = self
                 .x11_apps
