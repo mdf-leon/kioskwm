@@ -23,7 +23,8 @@ jobs:
           sudo apt-get install -y \
             build-essential pkg-config \
             libseat-dev libinput-dev libudev-dev libxkbcommon-dev \
-            libgbm-dev libdrm-dev libegl1-mesa-dev libwayland-dev
+            libgbm-dev libdrm-dev libegl1-mesa-dev libwayland-dev \
+            libpixman-1-dev
 
       - name: Build release
         run: cargo build --release
